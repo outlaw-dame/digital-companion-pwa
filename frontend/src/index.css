@@ -1,115 +1,178 @@
+@import 'tailwindcss';
+@import 'konsta/react/theme.css';
+
+/* ── iOS-grade Custom Properties ──────────────────────────────────────────── */
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  /* Safe area insets — critical for iPhone notch/Dynamic Island */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  /* ANE brand palette */
+  --ane-void:       #0a0a0f;
+  --ane-deep:       #0f0f1a;
+  --ane-surface:    #14141f;
+  --ane-overlay:    rgba(255, 255, 255, 0.04);
+  --ane-border:     rgba(255, 255, 255, 0.08);
+  --ane-text:       rgba(255, 255, 255, 0.92);
+  --ane-muted:      rgba(255, 255, 255, 0.40);
+  --ane-accent:     #7c6bff;  /* Lumina's primary — iridescent violet */
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* Affect-state aura colors — each state has a distinct visual signature */
+  --aura-observing:     rgba(140, 140, 180, 0.25);
+  --aura-resonating:    rgba(100, 200, 255, 0.35);
+  --aura-grounding:     rgba(120, 160, 255, 0.40);
+  --aura-activating:    rgba(255, 180, 100, 0.35);
+  --aura-analyzing:     rgba(180, 255, 140, 0.30);
+  --aura-synchronizing: rgba(200, 140, 255, 0.35);
+  --aura-dormant:       rgba(80,  80, 100, 0.20);
 
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  /* Glow shadows per state */
+  --glow-observing:     0 0 40px rgba(140, 140, 180, 0.20), 0 0 80px rgba(140, 140, 180, 0.08);
+  --glow-resonating:    0 0 40px rgba(100, 200, 255, 0.30), 0 0 80px rgba(100, 200, 255, 0.12);
+  --glow-grounding:     0 0 40px rgba(120, 160, 255, 0.35), 0 0 80px rgba(120, 160, 255, 0.15);
+  --glow-activating:    0 0 40px rgba(255, 180, 100, 0.30), 0 0 80px rgba(255, 180, 100, 0.12);
+  --glow-analyzing:     0 0 40px rgba(180, 255, 140, 0.25), 0 0 80px rgba(180, 255, 140, 0.10);
+  --glow-synchronizing: 0 0 40px rgba(200, 140, 255, 0.30), 0 0 80px rgba(200, 140, 255, 0.12);
+  --glow-dormant:       0 0 20px rgba(80,  80, 100, 0.15);
+
+  /* Typography */
+  --font-display: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  --font-body:    'SF Pro Text',    -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  --font-mono:    'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+/* ── Base Reset ───────────────────────────────────────────────────────────── */
+*, *::before, *::after {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html {
+  background: var(--ane-void);
+  height: 100%;
+  /* Prevent iOS bounce scroll on the root */
+  overflow: hidden;
 }
 
 body {
   margin: 0;
+  padding: 0;
+  font-family: var(--font-body);
+  background: var(--ane-void);
+  color: var(--ane-text);
+  height: 100%;
+  overflow: hidden;
+  /* iOS momentum scrolling for inner scroll containers */
+  -webkit-overflow-scrolling: touch;
+  /* Prevent text size adjustment on orientation change */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
+#root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
+/* ── Scrollable content areas ─────────────────────────────────────────────── */
+.scroll-area {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+/* ── Glassmorphism utilities ─────────────────────────────────────────────── */
+.glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--ane-border);
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+.glass-heavy {
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(40px) saturate(200%);
+  -webkit-backdrop-filter: blur(40px) saturate(200%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* ── Aura animations ─────────────────────────────────────────────────────── */
+@keyframes aura-pulse {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50%       { opacity: 1.0; transform: scale(1.06); }
+}
+
+@keyframes aura-breathe {
+  0%, 100% { transform: scale(1.00); opacity: 0.8; }
+  50%       { transform: scale(1.04); opacity: 1.0; }
+}
+
+@keyframes aura-spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes aura-flicker {
+  0%, 100% { opacity: 0.9; }
+  25%       { opacity: 1.0; }
+  50%       { opacity: 0.8; }
+  75%       { opacity: 0.95; }
+}
+
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-aura-pulse     { animation: aura-pulse 3s ease-in-out infinite; }
+.animate-aura-breathe   { animation: aura-breathe 4s ease-in-out infinite; }
+.animate-aura-spin-slow { animation: aura-spin-slow 20s linear infinite; }
+.animate-aura-flicker   { animation: aura-flicker 2s ease-in-out infinite; }
+.animate-fade-in-up     { animation: fade-in-up 0.4s ease-out both; }
+
+/* ── Input — iOS native feel ─────────────────────────────────────────────── */
+.ane-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  outline: none;
+  width: 100%;
+  font-family: var(--font-body);
+  font-size: 17px; /* iOS standard body size */
+  line-height: 1.4;
+  color: var(--ane-text);
+  caret-color: var(--ane-accent);
+  resize: none;
+}
+
+.ane-input::placeholder {
+  color: var(--ane-muted);
+}
+
+/* ── Tier badge ──────────────────────────────────────────────────────────── */
+.tier-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* ── Sync bar ────────────────────────────────────────────────────────────── */
+.sync-bar-fill {
+  background: linear-gradient(90deg, var(--ane-accent), rgba(124, 107, 255, 0.6));
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Message bubble ─────────────────────────────────────────────────────── */
+.message-entity {
+  animation: fade-in-up 0.3s ease-out both;
+}

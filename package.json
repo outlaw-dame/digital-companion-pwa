@@ -1,0 +1,14 @@
+{
+  "name": "ane-companion",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["server", "client"],
+  "scripts": {
+    "dev": "concurrently \"bun run --cwd server dev\" \"bun run --cwd client dev\"",
+    "build": "bun run --cwd server build && bun run --cwd client build",
+    "start": "bun run --cwd server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}

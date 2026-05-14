@@ -21,9 +21,10 @@ import { AuraOrb } from './components/AuraOrb';
 import { MessageFeed } from './components/MessageFeed';
 import { SyncInput } from './components/SyncInput';
 import { StatusBar } from './components/StatusBar';
+import { ClientProviderPanel } from './components/ClientProviderPanel';
 import './index.css';
 
-type View = 'companion' | 'feed';
+type View = 'companion' | 'feed' | 'settings';
 
 export default function App() {
   const platform = usePlatform();
@@ -72,7 +73,7 @@ export default function App() {
             className="flex rounded-[10px] p-[3px]"
             style={{ background: 'rgba(255,255,255,0.06)' }}
           >
-            {(['companion', 'feed'] as View[]).map((v) => (
+            {(['companion', 'feed', 'settings'] as View[]).map((v) => (
               <button
                 key={v}
                 onClick={() => setActiveView(v)}
@@ -92,7 +93,7 @@ export default function App() {
                   letterSpacing: '-0.01em',
                 }}
               >
-                {v === 'companion' ? 'Entity' : 'Feed'}
+                {v === 'companion' ? 'Entity' : v === 'feed' ? 'Feed' : 'Settings'}
               </button>
             ))}
           </div>
@@ -157,12 +158,17 @@ export default function App() {
                 </div>
               )}
             </div>
-          ) : (
+          ) : activeView === 'feed' ? (
             /* Feed view: message history */
             <MessageFeed
               messages={ane.messages}
               entityDesignation={core.designation}
             />
+          ) : (
+            /* Settings view: Client-side AI configuration */
+            <div className="flex-1 overflow-y-auto scroll-area">
+              <ClientProviderPanel />
+            </div>
           )}
         </div>
 

@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "^0.2.46",
+    "@mediapipe/tasks-genai": "^0.10.14",
     "konsta": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

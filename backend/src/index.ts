@@ -24,6 +24,13 @@ const app = new Hono();
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 app.use("*", logger());
+
+// COOP/COEP headers for SharedArrayBuffer (required by WebLLM)
+app.use("*", async (c, next) => {
+  await next();
+  c.header("Cross-Origin-Opener-Policy", "same-origin");
+  c.header("Cross-Origin-Embedder-Policy", "require-corp");
+});
 app.use(
   "*",
   cors({

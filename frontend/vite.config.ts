@@ -3,6 +3,12 @@ import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  optimizeDeps: {
+    exclude: ['@mlc-ai/web-llm', '@mediapipe/tasks-genai'],
+  },
+  build: {
+    target: 'esnext',
+  },
   plugins: [
     react(),
     VitePWA({

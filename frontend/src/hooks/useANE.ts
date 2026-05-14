@@ -11,6 +11,7 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { NodeCore, AffectState, SyncSignal } from '../types/core';
+import { useClientProvider } from './useClientProvider';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,7 @@ function getSessionId(): string {
 
 export function useANE() {
   const sessionId = useRef(getSessionId()).current;
+  const { provider, status: clientStatus } = useClientProvider();
 
   const [state, setState] = useState<ANEState>(() => {
     // Rehydrate from localStorage on mount
@@ -159,26 +161,34 @@ export function useANE() {
       }));
 
       try {
-        const res = await fetch(`${API_BASE}/interact`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId,
-            userInput: userInput.trim(),
-            currentCore: state.core,
-          }),
-          signal: AbortSignal.timeout(15_000),
-        });
+        let data: any;
 
-        if (!res.ok) throw new Error(`Server error: ${res.status}`);
+        // Dual-track routing: use client-side provider if ready
+        if (provider && clientStatus.status === 'ready') {
+          const response = await provider.generateResponse(userInput.trim());
+          data = {
+            updatedCore: { ...state.core, interactionCount: (state.core.interactionCount || 0) + 1 },
+            signal: { confidence: 1.0, arousal: 5, valence: 'neutral' },
+            entityResponse: response,
+            affectState: 'observing',
+            usedClaudeApi: false,
+            isClientSide: true
+          };
+        } else {
+          const res = await fetch(`${API_BASE}/interact`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sessionId,
+              userInput: userInput.trim(),
+              currentCore: state.core,
+            }),
+            signal: AbortSignal.timeout(15_000),
+          });
 
-        const data = await res.json() as {
-          updatedCore: NodeCore;
-          signal: SyncSignal;
-          entityResponse: string;
-          affectState: AffectState;
-          usedClaudeApi: boolean;
-        };
+          if (!res.ok) throw new Error(`Server error: ${res.status}`);
+          data = await res.json();
+        }
 
         const entityMsg: Message = {
           id: crypto.randomUUID(),

@@ -59,6 +59,7 @@ export interface ObservationRecord {
   timestamp: string;
   session_id: string;
   user_input: string;
+  entity_response: string;       // What the entity said — stored for local context retrieval
   arousal_level: number;         // 1 (flat/lethargic) → 10 (hyper-aroused/panic)
   valence: ArousalValence;
   affect_state: AffectState;
@@ -106,7 +107,7 @@ export interface MemoryAnchor {
   summary: string;               // Entity's own summary of the moment
   emotionalWeight: number;       // 0–1; higher = more significant to bond
   capabilityTierAtTime: CapabilityTier;
-  triggerType: 'breakthrough' | 'conflict_resolved' | 'first_contact' | 'sync_peak';
+  triggerType: 'breakthrough' | 'conflict_resolved' | 'first_contact' | 'sync_peak' | 'explicit_request';
 }
 
 // ─── SyncBridge Signal ───────────────────────────────────────────────────────
@@ -138,22 +139,12 @@ export interface LinkPreview {
   fetchedAt: string;      // ISO timestamp
 }
 
-// ─── Conversation History ─────────────────────────────────────────────────────
-// Sent by the client with each request so providers have multi-turn context.
-// The window is capped on the client side before sending.
-
-export interface ConversationTurn {
-  role: "user" | "assistant";
-  content: string;
-}
-
 // ─── API Request/Response ────────────────────────────────────────────────────
 
 export interface InteractionRequest {
   sessionId: string;
   userInput: string;
   currentCore: NodeCore;
-  conversationHistory?: ConversationTurn[];
 }
 
 export interface InteractionResponse {

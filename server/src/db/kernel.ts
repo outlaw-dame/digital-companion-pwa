@@ -88,6 +88,7 @@ function initSchema(db: Database): void {
       timestamp TEXT NOT NULL,
       session_id TEXT NOT NULL,
       user_input TEXT NOT NULL,
+      entity_response TEXT NOT NULL DEFAULT '',
       arousal_level INTEGER NOT NULL,
       valence TEXT NOT NULL,
       affect_state TEXT NOT NULL,
@@ -100,6 +101,9 @@ function initSchema(db: Database): void {
       node_id TEXT NOT NULL REFERENCES node_core(id) ON DELETE CASCADE
     )
   `);
+
+  // Migrate existing databases — add entity_response if the column doesn't exist yet
+  db.exec(`ALTER TABLE observations ADD COLUMN IF NOT EXISTS entity_response TEXT NOT NULL DEFAULT ''`);
 
   // Index for temporal queries (pattern detection over time)
   db.exec(`
@@ -185,15 +189,16 @@ export function logObservation(
   const db = getDb();
   db.query(`
     INSERT INTO observations (
-      timestamp, session_id, user_input, arousal_level, valence,
+      timestamp, session_id, user_input, entity_response, arousal_level, valence,
       affect_state, eq_domain_targeted, capability_tier_at_time,
       sync_score, companion_response_state, used_claude_api,
       response_latency_ms, node_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     record.timestamp,
     record.session_id,
     record.user_input,
+    record.entity_response,
     record.arousal_level,
     record.valence,
     record.affect_state,
@@ -205,6 +210,38 @@ export function logObservation(
     record.response_latency_ms,
     nodeId,
   );
+}
+
+// ─── Conversation Retrieval ───────────────────────────────────────────────────
+// Reads recent turns from the local SQLite store.
+// This is the ONLY source of conversation history for provider prompts —
+// the client never sends conversation data to the server.
+
+export interface ConversationTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export function getRecentConversation(
+  nodeId: string,
+  limit = 3,            // number of exchanges (each = 1 user + 1 assistant turn)
+): ConversationTurn[] {
+  const db = getDb();
+  const rows = db.query(`
+    SELECT user_input, entity_response FROM observations
+    WHERE node_id = ?
+      AND entity_response != ''
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(nodeId, limit) as { user_input: string; entity_response: string }[];
+
+  // Rows come back newest-first; reverse to chronological before flattening
+  return rows
+    .reverse()
+    .flatMap((r) => [
+      { role: "user" as const,      content: r.user_input.slice(0, 500) },
+      { role: "assistant" as const, content: r.entity_response.slice(0, 500) },
+    ]);
 }
 
 // ─── Pattern Queries ──────────────────────────────────────────────────────────

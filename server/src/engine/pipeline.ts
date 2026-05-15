@@ -32,6 +32,7 @@ import {
   logObservation,
   addMemoryAnchor,
   getArousalPatterns,
+  getRecentConversation,
 } from "../db/kernel";
 import {
   processLocally,
@@ -47,6 +48,27 @@ import type { LinkPreview } from "../types/core";
 
 const LOCAL_CONFIDENCE_THRESHOLD = 0.75;
 
+// ─── Explicit memory detection ────────────────────────────────────────────────
+// Matches "remember this", "remember that X", "keep in mind X", etc.
+// Handled entirely locally — no cloud escalation ever happens for these.
+
+const REMEMBER_RE = /^\s*(?:remember|keep in mind|don't forget|make a note(?: of)?|note that|save this)[:\s]*(.*)/i;
+
+function detectExplicitMemoryRequest(input: string): string | null {
+  const m = REMEMBER_RE.exec(input.trim());
+  if (!m) return null;
+  return m[1].trim() || null; // null = "remember this" with no explicit content
+}
+
+function memoryAckResponse(designation: string, attribute: NodeCore["attribute"]): string {
+  const responses: Record<typeof attribute, string> = {
+    sentinel: `Anchored. I've committed this to my persistent record — it will inform how I understand and support you going forward.`,
+    arbiter:  `Noted and stored. This context is now part of my working model of you. I'll apply it where it's relevant.`,
+    catalyst: `Locked in. I've added this to my core context — expect me to challenge and build on it from here.`,
+  };
+  return responses[attribute] ?? `I've anchored this, ${designation}. It's now part of my persistent memory.`;
+}
+
 export interface ExtendedInteractionRequest extends InteractionRequest {
   preferredProvider?: ProviderName;
 }
@@ -59,7 +81,75 @@ export async function processInteraction(
   // 1. Load / create entity core
   const core = getOrCreateNodeCore(req.currentCore.id, req.currentCore.designation);
 
-  // 2. Local signal processing + link processing (run concurrently — independent)
+  // 2. Explicit memory request — handled entirely locally before any routing.
+  //    The user is explicitly telling the entity to remember something.
+  //    This never reaches an external AI provider.
+  const memoryContent = detectExplicitMemoryRequest(req.userInput);
+  const isExplicitMemoryRequest = memoryContent !== undefined;
+
+  if (isExplicitMemoryRequest) {
+    // Determine what to anchor: explicit content, or fall back to last user turn
+    let anchorSummary: string;
+    if (memoryContent) {
+      anchorSummary = memoryContent.slice(0, 200);
+    } else {
+      // "remember this" with no content — anchor the previous user turn
+      const recent = getRecentConversation(core.id, 1);
+      const lastUserTurn = recent.find((t) => t.role === "user");
+      anchorSummary = lastUserTurn
+        ? `User asked to remember: "${lastUserTurn.content.slice(0, 150)}"`
+        : "User requested context be anchored.";
+    }
+
+    const anchor: MemoryAnchor = {
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      summary: anchorSummary,
+      emotionalWeight: 0.8,
+      capabilityTierAtTime: core.tier,
+      triggerType: "explicit_request",
+    };
+    addMemoryAnchor(core.id, anchor);
+
+    const entityResponse = memoryAckResponse(core.designation, core.attribute);
+    const updatedCore: NodeCore = {
+      ...core,
+      memoryAnchors: [...core.memoryAnchors, anchor],
+      interactionCount: core.interactionCount + 1,
+      lastInteraction: new Date().toISOString(),
+    };
+    updateNodeCore(updatedCore);
+
+    logObservation(core.id, {
+      timestamp: new Date().toISOString(),
+      session_id: req.sessionId,
+      user_input: req.userInput,
+      entity_response: entityResponse,
+      arousal_level: 5,
+      valence: "neutral",
+      affect_state: "synchronizing",
+      eq_domain_targeted: "self-awareness",
+      capability_tier_at_time: core.tier,
+      sync_score: core.syncScore,
+      companion_response_state: "synchronizing",
+      used_claude_api: false,
+      response_latency_ms: Date.now() - startMs,
+    });
+
+    return {
+      updatedCore,
+      signal: processLocally(req.userInput, core),
+      entityResponse,
+      affectState: "synchronizing",
+      usedClaudeApi: false,
+      shouldCreateAnchor: true,
+      linkPreviews: [],
+      providerUsed: "local",
+      modelUsed: "memory-anchor-v1",
+    };
+  }
+
+  // 3. Local signal processing + link processing (run concurrently — independent)
   const [signal, linkPreviews] = await Promise.all([
     Promise.resolve(processLocally(req.userInput, core)),
     processLinks(req.userInput, process.env.GOOGLE_SAFE_BROWSING_API_KEY),
@@ -70,7 +160,12 @@ export async function processInteraction(
   const linkContext = formatLinksForPrompt(linkPreviews);
   const promptInput = linkContext ? `${req.userInput}\n${linkContext}` : req.userInput;
 
-  // 3. Response generation
+  // Retrieve recent conversation from local SQLite — never from the client.
+  // Cloud providers get last 3 exchanges; local/Ollama runs on-device so the
+  // limit is purely for prompt size, not privacy.
+  const conversationHistory = getRecentConversation(core.id, 3);
+
+  // 4. Response generation
   let entityResponse: string;
   let usedExternalApi = false;
   let providerUsed: ProviderName = "local";
@@ -103,7 +198,7 @@ export async function processInteraction(
       if (provider) {
         try {
           const patterns = getArousalPatterns(core.id);
-          const result = await provider.escalate(promptInput, signal, core, patterns, req.conversationHistory ?? []);
+          const result = await provider.escalate(promptInput, signal, core, patterns, conversationHistory);
 
           entityResponse = result.entityResponse;
           usedExternalApi = true;
@@ -147,12 +242,13 @@ export async function processInteraction(
   // 6. Persist
   updateNodeCore(updatedCore);
 
-  // 7. Log observation
+  // 7. Log observation — entity_response stored locally for future context retrieval
   const latency = Date.now() - startMs;
   logObservation(core.id, {
     timestamp: new Date().toISOString(),
     session_id: req.sessionId,
     user_input: req.userInput,
+    entity_response: entityResponse,
     arousal_level: refinedSignal.arousalLevel ?? signal.arousalLevel,
     valence: refinedSignal.valence ?? signal.valence,
     affect_state: refinedSignal.suggestedAffect ?? signal.suggestedAffect,

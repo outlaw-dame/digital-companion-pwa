@@ -15,7 +15,8 @@
  * in the ProviderRegistry (providerRegistry.ts).
  */
 
-import type { NodeCore, SyncSignal, ConversationTurn } from "../../types/core";
+import type { NodeCore, SyncSignal } from "../../types/core";
+import type { ConversationTurn } from "../../db/kernel";
 export type { ConversationTurn };
 
 // ─── Shared Message Format ────────────────────────────────────────────────────

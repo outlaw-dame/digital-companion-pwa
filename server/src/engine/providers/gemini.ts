@@ -12,6 +12,7 @@
 import type { AIProvider, GeminiProviderConfig, EscalationResult, ConversationTurn } from "./interface";
 import type { NodeCore, SyncSignal } from "../../types/core";
 import { buildSystemPrompt, buildUserPrompt, parseProviderResponse } from "./interface";
+import { ProviderError, withRetry, parseRetryAfter } from "./retry";
 
 const DEFAULT_MODEL = "gemini-2.0-flash";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -50,56 +51,53 @@ export class GeminiProvider implements AIProvider {
     const start = Date.now();
     const systemPrompt = buildSystemPrompt(core, patterns);
     const userPrompt = buildUserPrompt(userInput, signal);
-
-    // Gemini uses 'model' instead of 'assistant' and requires strict alternation.
     const historyContents = toGeminiContents(conversationHistory);
-
     const url = `${GEMINI_API_BASE}/${this.modelId}:generateContent`;
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": this.apiKey,
-      },
-      signal: AbortSignal.timeout(30_000),
-      body: JSON.stringify({
-        system_instruction: {
-          parts: [{ text: systemPrompt }],
+    return withRetry(async () => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey,
         },
-        contents: [
-          ...historyContents,
-          { role: "user", parts: [{ text: userPrompt }] },
-        ],
-        generationConfig: {
-          maxOutputTokens: 600,
-          temperature: 0.7,
-          responseMimeType: "application/json",
-        },
-      }),
+        signal: AbortSignal.timeout(30_000),
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: systemPrompt }] },
+          contents: [
+            ...historyContents,
+            { role: "user", parts: [{ text: userPrompt }] },
+          ],
+          generationConfig: {
+            maxOutputTokens: 600,
+            temperature: 0.7,
+            responseMimeType: "application/json",
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new ProviderError(response.status, "gemini", parseRetryAfter(response.headers));
+      }
+
+      const data = await response.json() as {
+        candidates?: {
+          content?: { parts?: { text?: string }[] };
+          finishReason?: string;
+        }[];
+        error?: { message: string };
+      };
+
+      if (data.error) throw new ProviderError(500, "gemini");
+
+      const parts = data.candidates?.[0]?.content?.parts;
+      const rawText = Array.isArray(parts)
+        ? parts.map((p) => p.text ?? "").join("")
+        : "";
+
+      if (!rawText) throw new ProviderError(500, "gemini");
+
+      return parseProviderResponse(rawText, "gemini", this.modelId, Date.now() - start);
     });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Gemini API ${response.status}: ${err}`);
-    }
-
-    const data = await response.json() as {
-      candidates?: {
-        content?: { parts?: { text?: string }[] };
-        finishReason?: string;
-      }[];
-      error?: { message: string };
-    };
-
-    if (data.error) {
-      throw new Error(`Gemini API error: ${data.error.message}`);
-    }
-
-    const rawText = data.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text ?? "")
-      .join("") ?? "";
-
-    return parseProviderResponse(rawText, "gemini", this.modelId, Date.now() - start);
   }
 }

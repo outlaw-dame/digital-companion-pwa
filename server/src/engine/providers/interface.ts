@@ -256,7 +256,7 @@ export function parseProviderResponse(
     };
   } catch {
     return {
-      entityResponse: raw.slice(0, 300),
+      entityResponse: raw.slice(0, 300) || "I'm processing that. Give me a moment.",
       refinedSignal: {},
       shouldCreateAnchor: false,
       providerUsed: providerName,

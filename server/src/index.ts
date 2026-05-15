@@ -21,6 +21,7 @@ import { getRegistry } from "./engine/providers/registry";
 import { CLOUDFLARE_MODELS } from "./engine/providers/cloudflare";
 import { processLinks } from "./engine/linkProcessor";
 import { getKlipyClient, isKlipyAvailable } from "./engine/klipyClient";
+import { makeRateLimiter } from "./utils/rateLimiter";
 import type { InteractionRequest } from "./types/core";
 import type { ProviderName } from "./engine/providers/interface";
 
@@ -32,22 +33,6 @@ const MAX_BODY_BYTES    = 64 * 1024;   // 64 KB — generous for any real conver
 const MAX_INPUT_CHARS   = 4_000;       // ~3× typical paragraph; beyond this is abuse
 const MAX_DESIGNATION   = 64;
 const UUID_RE           = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Per-IP rate limiters — prevent proxy abuse on media and link endpoints.
-function makeRateLimiter(limit: number, windowMs: number) {
-  const map = new Map<string, { count: number; windowStart: number }>();
-  return (ip: string): boolean => {
-    const now = Date.now();
-    const entry = map.get(ip);
-    if (!entry || now - entry.windowStart > windowMs) {
-      map.set(ip, { count: 1, windowStart: now });
-      return true;
-    }
-    if (entry.count >= limit) return false;
-    entry.count++;
-    return true;
-  };
-}
 
 const allowPreviewRequest = makeRateLimiter(20, 60_000);
 const allowMediaRequest   = makeRateLimiter(60, 60_000);  // GIF keyboard fetches in bursts
@@ -93,7 +78,8 @@ app.use("*", async (c, next) => {
 
 // Request size guard — reject oversized bodies before parsing JSON.
 app.use("/api/interact", async (c, next) => {
-  const contentLength = Number(c.req.header("content-length") ?? 0);
+  const rawLen = c.req.header("content-length");
+  const contentLength = rawLen ? parseInt(rawLen, 10) : 0;
   if (contentLength > MAX_BODY_BYTES) {
     return c.json({ error: "Request body too large" }, 413);
   }

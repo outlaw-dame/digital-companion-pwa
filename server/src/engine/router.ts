@@ -153,9 +153,9 @@ function classifyByRules(
 function sanitizeForClassifier(raw: string): string {
   return raw
     .slice(0, 200)
-    .replace(/[\r\n]+/g, " ")   // collapse newlines (prompt structure attack)
-    .replace(/["""]/g, "'")      // neutralise quote variants
-    .replace(/[^\x20-\x7E]/g, ""); // strip non-printable / non-ASCII
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/["""«»`]/g, "'")
+    .replace(/[^\x20-\x7E]/g, "");
 }
 
 async function classifyWithLLM(

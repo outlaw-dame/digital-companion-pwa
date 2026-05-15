@@ -35,6 +35,7 @@ import {
   buildUserPrompt,
   parseProviderResponse,
 } from "./interface";
+import { ProviderError, withRetry, parseRetryAfter } from "./retry";
 
 // ─── Available Models ─────────────────────────────────────────────────────────
 // Curated list of recommended text-generation models.
@@ -155,42 +156,39 @@ export class CloudflareProvider implements AIProvider {
 
     const url = `${this.baseUrl}/${encodeURIComponent(this.modelId)}`;
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${this.apiToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messages,
-        max_tokens: 600,
-        // Request JSON mode where supported
-        response_format: { type: "json_object" },
-      }),
+    return withRetry(async () => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages,
+          max_tokens: 600,
+          response_format: { type: "json_object" },
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!response.ok) {
+        throw new ProviderError(response.status, "cloudflare", parseRetryAfter(response.headers));
+      }
+
+      const data = await response.json() as CFChatCompletionsResponse;
+
+      if (!data.success) {
+        throw new ProviderError(500, "cloudflare");
+      }
+
+      const rawText =
+        data.result?.response ??
+        data.result?.choices?.[0]?.message?.content ??
+        "";
+
+      if (!rawText) throw new ProviderError(500, "cloudflare");
+
+      return parseProviderResponse(rawText, "cloudflare", this.modelId, Date.now() - start);
     });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Cloudflare Workers AI ${response.status}: ${err}`);
-    }
-
-    const data = await response.json() as CFChatCompletionsResponse;
-
-    if (!data.success) {
-      const errorMsg = data.errors.map((e) => e.message).join(", ");
-      throw new Error(`Cloudflare Workers AI error: ${errorMsg}`);
-    }
-
-    // Normalize response — CF models return either result.response or result.choices
-    const rawText =
-      data.result.response ??
-      data.result.choices?.[0]?.message?.content ??
-      "";
-
-    if (!rawText) {
-      throw new Error("Cloudflare Workers AI returned an empty response");
-    }
-
-    return parseProviderResponse(rawText, "cloudflare", this.modelId, Date.now() - start);
   }
 }

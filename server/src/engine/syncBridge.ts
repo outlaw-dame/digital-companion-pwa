@@ -91,7 +91,7 @@ const LEXICON: Record<string, LexiconEntry> = {
 
 export function processLocally(
   input: string,
-  core: NodeCore,
+  _core: NodeCore,
 ): SyncSignal {
   const text = input.toLowerCase();
   const now = new Date().toISOString();

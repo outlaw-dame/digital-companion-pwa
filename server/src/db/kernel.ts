@@ -17,11 +17,9 @@ import type {
   ObservationRecord,
   MemoryAnchor,
   CapabilityTier,
-  TIER_THRESHOLDS,
 } from "../types/core";
 import {
   RESILIENCE_DECAY_PER_HOUR,
-  RESILIENCE_MAX,
   RESILIENCE_MIN,
 } from "../types/core";
 
@@ -364,11 +362,8 @@ function applyResilienceDecay(core: NodeCore): NodeCore {
 
   if (decayed === core.traits.resilience) return core;
 
-  const updated = {
+  return {
     ...core,
     traits: { ...core.traits, resilience: decayed },
   };
-
-  updateNodeCore(updated);
-  return updated;
 }

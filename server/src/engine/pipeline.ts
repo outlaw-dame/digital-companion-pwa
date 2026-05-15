@@ -42,23 +42,12 @@ import {
 } from "./syncBridge";
 import { getRegistry } from "./providers/registry";
 import { resolveRouting } from "./router";
+import { detectExplicitMemoryRequest } from "./memoryDetection";
 import { processLinks, formatLinksForPrompt } from "./linkProcessor";
 import type { ProviderName } from "./providers/interface";
 import type { LinkPreview } from "../types/core";
 
 const LOCAL_CONFIDENCE_THRESHOLD = 0.75;
-
-// ─── Explicit memory detection ────────────────────────────────────────────────
-// Matches "remember this", "remember that X", "keep in mind X", etc.
-// Handled entirely locally — no cloud escalation ever happens for these.
-
-const REMEMBER_RE = /^\s*(?:remember|keep in mind|don't forget|make a note(?: of)?|note that|save this)[:\s]*(.*)/i;
-
-function detectExplicitMemoryRequest(input: string): string | null {
-  const m = REMEMBER_RE.exec(input.trim());
-  if (!m) return null;
-  return m[1].trim() || null; // null = "remember this" with no explicit content
-}
 
 function memoryAckResponse(designation: string, attribute: NodeCore["attribute"]): string {
   const responses: Record<typeof attribute, string> = {
@@ -84,14 +73,12 @@ export async function processInteraction(
   // 2. Explicit memory request — handled entirely locally before any routing.
   //    The user is explicitly telling the entity to remember something.
   //    This never reaches an external AI provider.
-  const memoryContent = detectExplicitMemoryRequest(req.userInput);
-  const isExplicitMemoryRequest = memoryContent !== undefined;
+  const memoryDetection = detectExplicitMemoryRequest(req.userInput);
 
-  if (isExplicitMemoryRequest) {
-    // Determine what to anchor: explicit content, or fall back to last user turn
+  if (memoryDetection.isMemoryRequest) {
     let anchorSummary: string;
-    if (memoryContent) {
-      anchorSummary = memoryContent.slice(0, 200);
+    if (memoryDetection.content) {
+      anchorSummary = memoryDetection.content;
     } else {
       // "remember this" with no content — anchor the previous user turn
       const recent = getRecentConversation(core.id, 1);
@@ -112,8 +99,12 @@ export async function processInteraction(
     addMemoryAnchor(core.id, anchor);
 
     const entityResponse = memoryAckResponse(core.designation, core.attribute);
+    const newResilience = Math.min(RESILIENCE_MAX, core.traits.resilience + RESILIENCE_REPLENISH_PER_INTERACTION);
+    const newSyncScore = Math.min(1, core.syncScore + 0.005);
     const updatedCore: NodeCore = {
       ...core,
+      traits: { ...core.traits, resilience: newResilience },
+      syncScore: newSyncScore,
       memoryAnchors: [...core.memoryAnchors, anchor],
       interactionCount: core.interactionCount + 1,
       lastInteraction: new Date().toISOString(),
@@ -130,7 +121,7 @@ export async function processInteraction(
       affect_state: "synchronizing",
       eq_domain_targeted: "self-awareness",
       capability_tier_at_time: core.tier,
-      sync_score: core.syncScore,
+      sync_score: newSyncScore,
       companion_response_state: "synchronizing",
       used_claude_api: false,
       response_latency_ms: Date.now() - startMs,

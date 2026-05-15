@@ -16,6 +16,7 @@ import {
   buildUserPrompt,
   parseProviderResponse,
 } from "./interface";
+import { ProviderError, withRetry, parseRetryAfter } from "./retry";
 
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
@@ -52,42 +53,42 @@ export class ClaudeProvider implements AIProvider {
     const start = Date.now();
     const systemPrompt = buildSystemPrompt(core, patterns);
     const userPrompt = buildUserPrompt(userInput, signal);
-
-    // Build message array: prior turns (alternating user/assistant) + current turn.
-    // Claude requires the array to start with a user message and strictly alternate.
     const historyMessages = toClaudeMessages(conversationHistory);
     const messages = [...historyMessages, { role: "user" as const, content: userPrompt }];
 
-    const response = await fetch(CLAUDE_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-        "x-api-key": this.apiKey,
-      },
-      body: JSON.stringify({
-        model: this.modelId,
-        max_tokens: 600,
-        system: systemPrompt,
-        messages,
-      }),
-      signal: AbortSignal.timeout(30_000),
+    return withRetry(async () => {
+      const response = await fetch(CLAUDE_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": this.apiKey,
+        },
+        body: JSON.stringify({
+          model: this.modelId,
+          max_tokens: 600,
+          system: systemPrompt,
+          messages,
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!response.ok) {
+        throw new ProviderError(response.status, "claude", parseRetryAfter(response.headers));
+      }
+
+      const data = await response.json() as {
+        content: { type: string; text: string }[];
+      };
+
+      const rawText = (data.content ?? [])
+        .filter((b) => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+
+      if (!rawText) throw new ProviderError(500, "claude");
+
+      return parseProviderResponse(rawText, "claude", this.modelId, Date.now() - start);
     });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Claude API ${response.status}: ${err}`);
-    }
-
-    const data = await response.json() as {
-      content: { type: string; text: string }[];
-    };
-
-    const rawText = data.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-
-    return parseProviderResponse(rawText, "claude", this.modelId, Date.now() - start);
   }
 }

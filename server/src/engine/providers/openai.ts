@@ -12,6 +12,7 @@
 import type { AIProvider, OpenAIProviderConfig, EscalationResult, ConversationTurn } from "./interface";
 import type { NodeCore, SyncSignal } from "../../types/core";
 import { buildSystemPrompt, buildUserPrompt, parseProviderResponse } from "./interface";
+import { ProviderError, withRetry, parseRetryAfter } from "./retry";
 
 const DEFAULT_MODEL = "gpt-4o";
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
@@ -41,42 +42,42 @@ export class OpenAIProvider implements AIProvider {
     const systemPrompt = buildSystemPrompt(core, patterns);
     const userPrompt = buildUserPrompt(userInput, signal);
 
-    const response = await fetch(OPENAI_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.modelId,
-        max_tokens: 600,
-        temperature: 0.7,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
-          { role: "user", content: userPrompt },
-        ],
-      }),
-      signal: AbortSignal.timeout(30_000),
+    return withRetry(async () => {
+      const response = await fetch(OPENAI_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: this.modelId,
+          max_tokens: 600,
+          temperature: 0.7,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
+            { role: "user", content: userPrompt },
+          ],
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!response.ok) {
+        throw new ProviderError(response.status, "openai", parseRetryAfter(response.headers));
+      }
+
+      const data = await response.json() as {
+        choices?: { message?: { content?: string } }[];
+        error?: { message: string };
+      };
+
+      if (data.error) throw new ProviderError(500, "openai");
+
+      const rawText = data.choices?.[0]?.message?.content ?? "";
+      if (!rawText) throw new ProviderError(500, "openai");
+
+      return parseProviderResponse(rawText, "openai", this.modelId, Date.now() - start);
     });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`OpenAI API ${response.status}: ${err}`);
-    }
-
-    const data = await response.json() as {
-      choices?: { message?: { content?: string } }[];
-      error?: { message: string };
-    };
-
-    if (data.error) {
-      throw new Error(`OpenAI API error: ${data.error.message}`);
-    }
-
-    const rawText = data.choices?.[0]?.message?.content ?? "";
-
-    return parseProviderResponse(rawText, "openai", this.modelId, Date.now() - start);
   }
 }

@@ -25,6 +25,7 @@ import {
   buildUserPrompt,
   parseProviderResponse,
 } from "./interface";
+import { ProviderError, withRetry } from "./retry";
 
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL = "llama3.2";
@@ -41,7 +42,6 @@ export class OllamaProvider implements AIProvider {
   readonly name = "ollama" as const;
   readonly modelId: string;
   private readonly baseUrl: string;
-  private _available: boolean | null = null;
 
   constructor(config: OllamaProviderConfig) {
     this.baseUrl = config.baseUrl ?? DEFAULT_OLLAMA_URL;
@@ -72,34 +72,30 @@ export class OllamaProvider implements AIProvider {
       { role: "user", content: userPrompt },
     ];
 
-    const response = await fetch(`${this.baseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: this.modelId,
-        messages,
-        stream: false,
-        format: "json", // Ollama JSON mode
-        options: {
-          num_predict: 600,
-          temperature: 0.7,
-        },
-      }),
-      signal: AbortSignal.timeout(30_000), // 30s timeout for local inference
+    return withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: this.modelId,
+          messages,
+          stream: false,
+          format: "json",
+          options: { num_predict: 600, temperature: 0.7 },
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!response.ok) {
+        throw new ProviderError(response.status, "ollama");
+      }
+
+      const data = await response.json() as OllamaChatResponse;
+      const rawText = data.message?.content ?? "";
+
+      if (!rawText) throw new ProviderError(500, "ollama");
+
+      return parseProviderResponse(rawText, "ollama", this.modelId, Date.now() - start);
     });
-
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`Ollama ${response.status}: ${err}`);
-    }
-
-    const data = await response.json() as OllamaChatResponse;
-    const rawText = data.message?.content ?? "";
-
-    if (!rawText) {
-      throw new Error("Ollama returned an empty response");
-    }
-
-    return parseProviderResponse(rawText, "ollama", this.modelId, Date.now() - start);
   }
 }

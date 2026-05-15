@@ -9,7 +9,7 @@
  *   - Timestamp formatting (relative for recent, absolute for older)
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import type { Message } from '../hooks/useANE';
 import type { AffectState } from '../types/core';
 import { AFFECT_META } from '../types/core';
@@ -18,9 +18,10 @@ import { LinkPreviewCard } from './LinkPreviewCard';
 interface MessageFeedProps {
   messages: Message[];
   entityDesignation: string;
+  onDeleteMessage: (messageId: string) => Promise<{ deleted: boolean; safetyMessage?: string }>;
 }
 
-export function MessageFeed({ messages, entityDesignation }: MessageFeedProps) {
+export function MessageFeed({ messages, entityDesignation, onDeleteMessage }: MessageFeedProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom on new messages
@@ -48,6 +49,7 @@ export function MessageFeed({ messages, entityDesignation }: MessageFeedProps) {
           key={msg.id}
           message={msg}
           entityDesignation={entityDesignation}
+          onDelete={onDeleteMessage}
         />
       ))}
       <div ref={bottomRef} />
@@ -60,40 +62,69 @@ export function MessageFeed({ messages, entityDesignation }: MessageFeedProps) {
 function MessageBubble({
   message,
   entityDesignation,
+  onDelete,
 }: {
   message: Message;
   entityDesignation: string;
+  onDelete: (id: string) => Promise<{ deleted: boolean; safetyMessage?: string }>;
 }) {
   const isUser = message.role === 'user';
   const ts = formatTimestamp(message.timestamp);
+  const [hovered, setHovered] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [safetyMsg, setSafetyMsg] = useState<string | null>(null);
+
+  const canDelete = Boolean(message.observationId);
+
+  const handleDelete = useCallback(async () => {
+    if (!canDelete || deleting) return;
+    setDeleting(true);
+    setSafetyMsg(null);
+    const result = await onDelete(message.id);
+    if (!result.deleted) {
+      setDeleting(false);
+      if (result.safetyMessage) setSafetyMsg(result.safetyMessage);
+    }
+    // If deleted, this component is unmounted — no state update needed
+  }, [canDelete, deleting, message.id, onDelete]);
 
   if (isUser) {
     const isGifOnly = Boolean(message.gifAttachment) && message.content.startsWith('[GIF');
 
     return (
-      <div className="flex flex-col items-end gap-1 animate-fade-in-up">
-        {/* GIF attachment — shown instead of the text bubble when it's a pure GIF send */}
+      <div
+        className="flex flex-col items-end gap-1 animate-fade-in-up"
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => { setHovered(false); setSafetyMsg(null); }}
+      >
+        {/* GIF attachment */}
         {message.gifAttachment && (
           <GifBubble gif={message.gifAttachment} align="right" ts={ts} />
         )}
 
-        {/* Text bubble — hidden for pure GIF messages, shown for text-with-link messages */}
+        {/* Text bubble */}
         {!isGifOnly && (
-          <div
-            className="max-w-[75%] px-4 py-3 rounded-[20px] rounded-tr-[6px]"
-            style={{
-              background: 'var(--ane-accent)',
-              color: 'white',
-              fontSize: 15,
-              lineHeight: 1.45,
-            }}
-          >
-            {message.content}
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
+            {/* Delete button — appears on hover, left of the bubble */}
+            {hovered && canDelete && (
+              <DeleteButton deleting={deleting} onClick={handleDelete} />
+            )}
             <div
-              className="mt-1 text-right text-[10px]"
-              style={{ color: 'rgba(255,255,255,0.55)' }}
+              className="max-w-[75%] px-4 py-3 rounded-[20px] rounded-tr-[6px]"
+              style={{
+                background: 'var(--ane-accent)',
+                color: 'white',
+                fontSize: 15,
+                lineHeight: 1.45,
+              }}
             >
-              {ts}
+              {message.content}
+              <div
+                className="mt-1 text-right text-[10px]"
+                style={{ color: 'rgba(255,255,255,0.55)' }}
+              >
+                {ts}
+              </div>
             </div>
           </div>
         )}
@@ -106,6 +137,9 @@ function MessageBubble({
             ))}
           </div>
         )}
+
+        {/* Safety hold message */}
+        {safetyMsg && <SafetyNotice message={safetyMsg} />}
       </div>
     );
   }
@@ -116,7 +150,11 @@ function MessageBubble({
     : null;
 
   return (
-    <div className="flex justify-start message-entity">
+    <div
+      className="flex justify-start message-entity"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { setHovered(false); setSafetyMsg(null); }}
+    >
       <div className="flex flex-col gap-1 max-w-[80%]">
 
         {/* Entity label + affect indicator */}
@@ -155,28 +193,103 @@ function MessageBubble({
           )}
         </div>
 
-        {/* Bubble */}
-        <div
-          className="px-4 py-3 rounded-[20px] rounded-tl-[6px]"
-          style={{
-            background: 'rgba(255,255,255,0.06)',
-            backdropFilter: 'blur(12px)',
-            WebkitBackdropFilter: 'blur(12px)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            color: 'var(--ane-text)',
-            fontSize: 15,
-            lineHeight: 1.5,
-          }}
-        >
-          {message.content}
+        {/* Bubble + delete button */}
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
           <div
-            className="mt-1 text-[10px]"
-            style={{ color: 'var(--ane-muted)' }}
+            className="px-4 py-3 rounded-[20px] rounded-tl-[6px]"
+            style={{
+              background: 'rgba(255,255,255,0.06)',
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              color: 'var(--ane-text)',
+              fontSize: 15,
+              lineHeight: 1.5,
+            }}
           >
-            {ts}
+            {message.content}
+            <div
+              className="mt-1 text-[10px]"
+              style={{ color: 'var(--ane-muted)' }}
+            >
+              {ts}
+            </div>
           </div>
+          {/* Delete button — appears on hover, right of the entity bubble */}
+          {hovered && canDelete && (
+            <DeleteButton deleting={deleting} onClick={handleDelete} />
+          )}
         </div>
+
+        {/* Safety hold message */}
+        {safetyMsg && <SafetyNotice message={safetyMsg} />}
       </div>
+    </div>
+  );
+}
+
+// ─── Delete Button ────────────────────────────────────────────────────────────
+
+function DeleteButton({ deleting, onClick }: { deleting: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={deleting}
+      title="Delete this exchange"
+      aria-label="Delete this exchange"
+      style={{
+        flexShrink: 0,
+        width: 26,
+        height: 26,
+        borderRadius: '50%',
+        border: '1px solid rgba(255,255,255,0.10)',
+        background: 'rgba(255,255,255,0.04)',
+        color: deleting ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.35)',
+        cursor: deleting ? 'default' : 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        transition: 'color 0.15s ease, background 0.15s ease',
+        padding: 0,
+        lineHeight: 1,
+      }}
+      onMouseEnter={(e) => {
+        if (!deleting) (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,80,80,0.8)';
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.color = deleting
+          ? 'rgba(255,255,255,0.2)'
+          : 'rgba(255,255,255,0.35)';
+      }}
+    >
+      {deleting ? (
+        <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)' }}>…</span>
+      ) : (
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+          <path d="M1 1L10 10M10 1L1 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
+      )}
+    </button>
+  );
+}
+
+// ─── Safety Notice ────────────────────────────────────────────────────────────
+
+function SafetyNotice({ message }: { message: string }) {
+  return (
+    <div
+      style={{
+        maxWidth: '75%',
+        padding: '8px 12px',
+        borderRadius: 10,
+        background: 'rgba(255,200,100,0.08)',
+        border: '1px solid rgba(255,200,100,0.15)',
+        color: 'rgba(255,220,140,0.9)',
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}
+    >
+      {message}
     </div>
   );
 }

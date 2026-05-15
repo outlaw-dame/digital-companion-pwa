@@ -33,6 +33,8 @@ import {
   addMemoryAnchor,
   getArousalPatterns,
   getRecentConversation,
+  getLastObservation,
+  deleteObservation,
 } from "../db/kernel";
 import {
   processLocally,
@@ -42,7 +44,8 @@ import {
 } from "./syncBridge";
 import { getRegistry } from "./providers/registry";
 import { resolveRouting } from "./router";
-import { detectExplicitMemoryRequest } from "./memoryDetection";
+import { detectExplicitMemoryRequest, detectDeleteRequest } from "./memoryDetection";
+import { checkDeletionSafety, safetyHoldResponse } from "./safetyGate";
 import { processLinks, formatLinksForPrompt } from "./linkProcessor";
 import type { ProviderName } from "./providers/interface";
 import type { LinkPreview } from "../types/core";
@@ -62,15 +65,89 @@ export interface ExtendedInteractionRequest extends InteractionRequest {
   preferredProvider?: ProviderName;
 }
 
+export interface PipelineResult extends InteractionResponse {
+  providerUsed: ProviderName;
+  modelUsed: string;
+  linkPreviews: LinkPreview[];
+  observationId: number;
+}
+
 export async function processInteraction(
   req: ExtendedInteractionRequest,
-): Promise<InteractionResponse & { providerUsed: ProviderName; modelUsed: string; linkPreviews: LinkPreview[] }> {
+): Promise<PipelineResult> {
   const startMs = Date.now();
 
   // 1. Load / create entity core
   const core = getOrCreateNodeCore(req.currentCore.id, req.currentCore.designation);
 
-  // 2. Explicit memory request — handled entirely locally before any routing.
+  // 2. Explicit delete request — "delete this" / "forget that".
+  //    Locally classified. Never reaches an external AI provider.
+  //    Safety-gated: high-acuity crisis content is retained regardless.
+  const deleteDetection = detectDeleteRequest(req.userInput);
+
+  if (deleteDetection.isDeleteRequest) {
+    const last = getLastObservation(core.id);
+    let entityResponse: string;
+
+    if (!last) {
+      entityResponse = `There's nothing in my recent record to remove, ${core.designation}.`;
+    } else {
+      const safety = checkDeletionSafety(`${last.user_input} ${last.entity_response}`);
+      if (!safety.canDelete) {
+        entityResponse = safetyHoldResponse(safety.hold!, core.designation, core.attribute);
+      } else {
+        deleteObservation(last.id, core.id);
+        const deleteAck: Record<typeof core.attribute, string> = {
+          sentinel: `Cleared. That exchange has been purged from my local record — it won't inform my future responses.`,
+          arbiter:  `Done. I've removed that from my stored context. It no longer exists in my working model.`,
+          catalyst: `Erased. Gone from my record — I'm already operating as if it never happened.`,
+        };
+        entityResponse = deleteAck[core.attribute];
+      }
+    }
+
+    const newResilience = Math.min(RESILIENCE_MAX, core.traits.resilience + RESILIENCE_REPLENISH_PER_INTERACTION);
+    const newSyncScore = Math.min(1, core.syncScore + 0.005);
+    const updatedCore: NodeCore = {
+      ...core,
+      traits: { ...core.traits, resilience: newResilience },
+      syncScore: newSyncScore,
+      interactionCount: core.interactionCount + 1,
+      lastInteraction: new Date().toISOString(),
+    };
+    updateNodeCore(updatedCore);
+
+    const obsId = logObservation(core.id, {
+      timestamp: new Date().toISOString(),
+      session_id: req.sessionId,
+      user_input: req.userInput,
+      entity_response: entityResponse,
+      arousal_level: 5,
+      valence: "neutral",
+      affect_state: "synchronizing",
+      eq_domain_targeted: "self-awareness",
+      capability_tier_at_time: core.tier,
+      sync_score: newSyncScore,
+      companion_response_state: "synchronizing",
+      used_claude_api: false,
+      response_latency_ms: Date.now() - startMs,
+    });
+
+    return {
+      updatedCore,
+      signal: processLocally(req.userInput, core),
+      entityResponse,
+      affectState: "synchronizing",
+      usedClaudeApi: false,
+      shouldCreateAnchor: false,
+      linkPreviews: [],
+      providerUsed: "local",
+      modelUsed: "delete-gate-v1",
+      observationId: obsId,
+    };
+  }
+
+  // 3. Explicit memory request — handled entirely locally before any routing.
   //    The user is explicitly telling the entity to remember something.
   //    This never reaches an external AI provider.
   const memoryDetection = detectExplicitMemoryRequest(req.userInput);
@@ -111,7 +188,7 @@ export async function processInteraction(
     };
     updateNodeCore(updatedCore);
 
-    logObservation(core.id, {
+    const memObsId = logObservation(core.id, {
       timestamp: new Date().toISOString(),
       session_id: req.sessionId,
       user_input: req.userInput,
@@ -137,6 +214,7 @@ export async function processInteraction(
       linkPreviews: [],
       providerUsed: "local",
       modelUsed: "memory-anchor-v1",
+      observationId: memObsId,
     };
   }
 
@@ -235,7 +313,7 @@ export async function processInteraction(
 
   // 7. Log observation — entity_response stored locally for future context retrieval
   const latency = Date.now() - startMs;
-  logObservation(core.id, {
+  const observationId = logObservation(core.id, {
     timestamp: new Date().toISOString(),
     session_id: req.sessionId,
     user_input: req.userInput,
@@ -277,5 +355,6 @@ export async function processInteraction(
     linkPreviews,
     providerUsed,
     modelUsed,
+    observationId,
   };
 }

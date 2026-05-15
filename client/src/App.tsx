@@ -239,6 +239,7 @@ export default function App() {
             <MessageFeed
               messages={ane.messages}
               entityDesignation={core.designation}
+              onDeleteMessage={ane.deleteMessage}
             />
           )}
 

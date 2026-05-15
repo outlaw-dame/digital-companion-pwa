@@ -155,6 +155,7 @@ export interface InteractionResponse {
   usedClaudeApi: boolean;
   shouldCreateAnchor: boolean;
   linkPreviews: LinkPreview[];   // Empty array when no URLs found
+  observationId: number;         // SQLite rowid — client uses this to target DELETE /api/observations/:id
 }
 
 // ─── Capability Tier Thresholds ──────────────────────────────────────────────

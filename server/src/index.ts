@@ -16,7 +16,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { processInteraction } from "./engine/pipeline";
-import { getNodeCore, getArousalPatterns } from "./db/kernel";
+import { getNodeCore, getArousalPatterns, getObservation, deleteObservation, deleteMemoryAnchor } from "./db/kernel";
+import { checkDeletionSafety, safetyHoldResponse } from "./engine/safetyGate";
 import { getRegistry } from "./engine/providers/registry";
 import { CLOUDFLARE_MODELS } from "./engine/providers/cloudflare";
 import { processLinks } from "./engine/linkProcessor";
@@ -36,6 +37,7 @@ const UUID_RE           = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 
 const allowPreviewRequest = makeRateLimiter(20, 60_000);
 const allowMediaRequest   = makeRateLimiter(60, 60_000);  // GIF keyboard fetches in bursts
+const allowDeleteRequest  = makeRateLimiter(10, 60_000);  // 10 deletes/minute per IP
 
 function clientIp(req: { header(name: string): string | undefined }): string {
   return (
@@ -61,7 +63,7 @@ app.use(
   "*",
   cors({
     origin: allowedOrigins,
-    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type"],
   }),
 );
@@ -239,6 +241,97 @@ app.post("/api/media/gifs/:slug/share", async (c) => {
 
 app.get("/api/media/status", (c) => {
   return c.json({ gifAvailable: isKlipyAvailable() });
+});
+
+// ─── Observation Delete ───────────────────────────────────────────────────────
+// Hard-deletes an observation (user message + entity response pair).
+// Safety-gated: high-acuity crisis content is rejected with 403.
+// Ownership-enforced: the observation's node_id must match the body's nodeId.
+
+app.delete("/api/observations/:id", async (c) => {
+  if (!allowDeleteRequest(clientIp(c.req))) {
+    return c.json({ error: "Too many requests" }, 429);
+  }
+
+  const { id: rawId } = c.req.param();
+  const obsId = parseInt(rawId, 10);
+  if (!Number.isFinite(obsId) || obsId <= 0) {
+    return c.json({ error: "Invalid observation id" }, 400);
+  }
+
+  const ct = c.req.header("content-type") ?? "";
+  if (!ct.includes("application/json")) {
+    return c.json({ error: "Content-Type must be application/json" }, 415);
+  }
+
+  let body: { nodeId?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (typeof body.nodeId !== "string" || !UUID_RE.test(body.nodeId)) {
+    return c.json({ error: "nodeId must be a valid UUID" }, 400);
+  }
+  const nodeId = body.nodeId;
+
+  const obs = getObservation(obsId, nodeId);
+  if (!obs) return c.json({ error: "Not found" }, 404);
+
+  const safety = checkDeletionSafety(`${obs.user_input} ${obs.entity_response}`);
+  if (!safety.canDelete) {
+    // Load node core for character-consistent response; fall back to generic if not found
+    const core = getNodeCore(nodeId);
+    const attribute = core?.attribute ?? "sentinel";
+    const designation = core?.designation ?? "you";
+    return c.json({
+      deleted: false,
+      reason: safety.hold,
+      entityMessage: safetyHoldResponse(safety.hold!, designation, attribute),
+    }, 403);
+  }
+
+  const deleted = deleteObservation(obsId, nodeId);
+  if (!deleted) return c.json({ error: "Not found" }, 404);
+
+  return c.json({ deleted: true });
+});
+
+// ─── Memory Anchor Delete ─────────────────────────────────────────────────────
+// Hard-deletes a memory anchor. No safety gate — anchors are entity-generated
+// summaries, not raw user input; user retains full control over their anchors.
+
+app.delete("/api/anchors/:anchorId", async (c) => {
+  if (!allowDeleteRequest(clientIp(c.req))) {
+    return c.json({ error: "Too many requests" }, 429);
+  }
+
+  const { anchorId } = c.req.param();
+  if (!anchorId || !UUID_RE.test(anchorId)) {
+    return c.json({ error: "Invalid anchor id" }, 400);
+  }
+
+  const ct = c.req.header("content-type") ?? "";
+  if (!ct.includes("application/json")) {
+    return c.json({ error: "Content-Type must be application/json" }, 415);
+  }
+
+  let body: { nodeId?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (typeof body.nodeId !== "string" || !UUID_RE.test(body.nodeId)) {
+    return c.json({ error: "nodeId must be a valid UUID" }, 400);
+  }
+
+  const deleted = deleteMemoryAnchor(anchorId, body.nodeId);
+  if (!deleted) return c.json({ error: "Not found" }, 404);
+
+  return c.json({ deleted: true });
 });
 
 // ─── Interact ─────────────────────────────────────────────────────────────────

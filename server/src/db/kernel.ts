@@ -100,8 +100,13 @@ function initSchema(db: Database): void {
     )
   `);
 
-  // Migrate existing databases — add entity_response if the column doesn't exist yet
-  db.exec(`ALTER TABLE observations ADD COLUMN IF NOT EXISTS entity_response TEXT NOT NULL DEFAULT ''`);
+  // Migrate existing databases — add entity_response if the column doesn't exist yet.
+  // Try-catch is more portable than IF NOT EXISTS (not supported in all SQLite versions).
+  try {
+    db.exec(`ALTER TABLE observations ADD COLUMN entity_response TEXT NOT NULL DEFAULT ''`);
+  } catch {
+    // Column already exists — migration already applied, safe to continue
+  }
 
   // Index for temporal queries (pattern detection over time)
   db.exec(`
@@ -183,9 +188,9 @@ export function updateNodeCore(core: NodeCore): void {
 export function logObservation(
   nodeId: string,
   record: Omit<ObservationRecord, "id">,
-): void {
+): number {
   const db = getDb();
-  db.query(`
+  const result = db.query(`
     INSERT INTO observations (
       timestamp, session_id, user_input, entity_response, arousal_level, valence,
       affect_state, eq_domain_targeted, capability_tier_at_time,
@@ -208,6 +213,66 @@ export function logObservation(
     record.response_latency_ms,
     nodeId,
   );
+  return Number(result.lastInsertRowid);
+}
+
+// ─── Observation Deletion ─────────────────────────────────────────────────────
+
+export interface ObservationSummary {
+  id: number;
+  user_input: string;
+  entity_response: string;
+  node_id: string;
+}
+
+/**
+ * Returns the most recent observation for a node.
+ * Used by the "delete this" verbal command to identify what to delete.
+ */
+export function getLastObservation(nodeId: string): ObservationSummary | null {
+  const db = getDb();
+  return (db.query(`
+    SELECT id, user_input, entity_response, node_id FROM observations
+    WHERE node_id = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(nodeId) as ObservationSummary | null);
+}
+
+/**
+ * Fetches a single observation by ID with ownership verification.
+ * Returns null if not found or if nodeId doesn't match — prevents cross-node access.
+ */
+export function getObservation(id: number, nodeId: string): ObservationSummary | null {
+  const db = getDb();
+  return (db.query(`
+    SELECT id, user_input, entity_response, node_id FROM observations
+    WHERE id = ? AND node_id = ?
+  `).get(id, nodeId) as ObservationSummary | null);
+}
+
+/**
+ * Hard-deletes an observation. Ownership-checked: nodeId must match.
+ * Returns true if a row was deleted, false if not found or ownership mismatch.
+ */
+export function deleteObservation(id: number, nodeId: string): boolean {
+  const db = getDb();
+  const result = db.query(`
+    DELETE FROM observations WHERE id = ? AND node_id = ?
+  `).run(id, nodeId);
+  return result.changes > 0;
+}
+
+/**
+ * Hard-deletes a memory anchor. Ownership-checked: nodeId must match.
+ * Returns true if a row was deleted, false if not found or ownership mismatch.
+ */
+export function deleteMemoryAnchor(anchorId: string, nodeId: string): boolean {
+  const db = getDb();
+  const result = db.query(`
+    DELETE FROM memory_anchors WHERE id = ? AND node_id = ?
+  `).run(anchorId, nodeId);
+  return result.changes > 0;
 }
 
 // ─── Conversation Retrieval ───────────────────────────────────────────────────
@@ -341,6 +406,15 @@ function deserializeCore(
     lastInteraction: row.last_interaction as string | null,
     memoryAnchors: anchors,
   };
+}
+
+// ─── Test Injection ───────────────────────────────────────────────────────────
+// Allows tests to inject an in-memory database without touching the real store.
+// NEVER call this from production code.
+
+export function __setTestDb(db: Database): void {
+  _db = db;
+  initSchema(db);
 }
 
 /**

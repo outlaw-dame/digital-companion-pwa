@@ -31,6 +31,7 @@ export interface Message {
   role: 'user' | 'entity';
   content: string;
   timestamp: string;
+  observationId?: number;        // Server DB rowid — present when server-processed; used for deletion
   affectState?: AffectState;
   usedExternalApi?: boolean;
   providerUsed?: ProviderName;
@@ -205,11 +206,13 @@ export function useANE() {
           providerUsed?: ProviderName;
           modelUsed?: string;
           linkPreviews?: LinkPreview[];
+          observationId?: number;
         };
 
-        // Attach link previews to the user message (they came from user's input)
+        // Attach link previews and observationId to user message
         const userMsgWithPreviews: Message = {
           ...userMsg,
+          observationId: data.observationId,
           linkPreviews: data.linkPreviews?.length ? data.linkPreviews : undefined,
         };
 
@@ -218,6 +221,7 @@ export function useANE() {
           role: 'entity',
           content: data.entityResponse,
           timestamp: new Date().toISOString(),
+          observationId: data.observationId,
           affectState: data.affectState,
           usedExternalApi: data.usedClaudeApi,
           providerUsed: data.providerUsed,
@@ -394,6 +398,7 @@ export function useANE() {
         usedClaudeApi: boolean;
         providerUsed?: ProviderName;
         modelUsed?: string;
+        observationId?: number;
       };
 
       const entityMsg: Message = {
@@ -401,6 +406,7 @@ export function useANE() {
         role: 'entity',
         content: data.entityResponse,
         timestamp: new Date().toISOString(),
+        observationId: data.observationId,
         affectState: data.affectState,
         usedExternalApi: data.usedClaudeApi,
         providerUsed: data.providerUsed,
@@ -455,12 +461,51 @@ export function useANE() {
     localStorage.removeItem(MESSAGES_STORAGE_KEY);
   }, []);
 
+  // Delete a single message pair by client message ID.
+  // Finds the observationId on that message, calls the server to delete the DB row,
+  // and removes BOTH the user message and entity response from the feed on success.
+  // Returns true if deleted, false if no-op (no observationId, network failure, safety hold).
+
+  const deleteMessage = useCallback(
+    async (messageId: string): Promise<{ deleted: boolean; safetyMessage?: string }> => {
+      const msg = state.messages.find((m) => m.id === messageId);
+      if (!msg?.observationId || !state.core) return { deleted: false };
+
+      try {
+        const res = await fetch(`${API_BASE}/observations/${msg.observationId}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nodeId: state.core.id }),
+          signal: AbortSignal.timeout(8_000),
+        });
+
+        if (res.status === 403) {
+          const data = await res.json() as { entityMessage?: string };
+          return { deleted: false, safetyMessage: data.entityMessage };
+        }
+
+        if (!res.ok) return { deleted: false };
+
+        // Remove all messages sharing this observationId (user + entity pair)
+        setState((prev) => ({
+          ...prev,
+          messages: prev.messages.filter((m) => m.observationId !== msg.observationId),
+        }));
+        return { deleted: true };
+      } catch {
+        return { deleted: false };
+      }
+    },
+    [state.messages, state.core],
+  );
+
   return {
     ...state,
     sendMessage,
     sendMessageViaClient,
     sendGif,
     clearMessages,
+    deleteMessage,
     setPreferredProvider,
   };
 }

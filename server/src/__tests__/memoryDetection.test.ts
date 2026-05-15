@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { detectExplicitMemoryRequest } from "../engine/memoryDetection";
+import { detectExplicitMemoryRequest, detectDeleteRequest } from "../engine/memoryDetection";
 
 describe("detectExplicitMemoryRequest", () => {
   test("returns isMemoryRequest=false for ordinary messages", () => {
@@ -74,5 +74,67 @@ describe("detectExplicitMemoryRequest", () => {
     const r = detectExplicitMemoryRequest(`remember that ${longContent}`);
     expect(r.isMemoryRequest).toBe(true);
     expect(r.content?.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe("detectDeleteRequest", () => {
+  test("detects 'delete this'", () => {
+    expect(detectDeleteRequest("delete this").isDeleteRequest).toBe(true);
+  });
+
+  test("detects 'delete that'", () => {
+    expect(detectDeleteRequest("delete that").isDeleteRequest).toBe(true);
+  });
+
+  test("detects 'forget this'", () => {
+    expect(detectDeleteRequest("forget this").isDeleteRequest).toBe(true);
+  });
+
+  test("detects 'forget that'", () => {
+    expect(detectDeleteRequest("forget that").isDeleteRequest).toBe(true);
+  });
+
+  test("detects 'remove this'", () => {
+    expect(detectDeleteRequest("remove this").isDeleteRequest).toBe(true);
+  });
+
+  test("detects 'erase that'", () => {
+    expect(detectDeleteRequest("erase that").isDeleteRequest).toBe(true);
+  });
+
+  test("detects 'please delete this'", () => {
+    expect(detectDeleteRequest("please delete this").isDeleteRequest).toBe(true);
+  });
+
+  test("detects 'delete my last message'", () => {
+    expect(detectDeleteRequest("delete my last message").isDeleteRequest).toBe(true);
+  });
+
+  test("detects with trailing punctuation", () => {
+    expect(detectDeleteRequest("forget this.").isDeleteRequest).toBe(true);
+    expect(detectDeleteRequest("delete that!").isDeleteRequest).toBe(true);
+  });
+
+  test("is case-insensitive", () => {
+    expect(detectDeleteRequest("DELETE THIS").isDeleteRequest).toBe(true);
+    expect(detectDeleteRequest("Forget That").isDeleteRequest).toBe(true);
+  });
+
+  test("does NOT match ordinary messages", () => {
+    expect(detectDeleteRequest("how are you?").isDeleteRequest).toBe(false);
+    expect(detectDeleteRequest("I feel anxious").isDeleteRequest).toBe(false);
+    expect(detectDeleteRequest("").isDeleteRequest).toBe(false);
+  });
+
+  test("does NOT match 'delete my file' — specific noun prevents match", () => {
+    expect(detectDeleteRequest("delete my file").isDeleteRequest).toBe(false);
+  });
+
+  test("does NOT match 'forget to buy milk' — infinitive, not pronoun", () => {
+    expect(detectDeleteRequest("forget to buy milk").isDeleteRequest).toBe(false);
+  });
+
+  test("does NOT match 'please forget I ever said that' — extra content", () => {
+    expect(detectDeleteRequest("please forget I ever said that").isDeleteRequest).toBe(false);
   });
 });

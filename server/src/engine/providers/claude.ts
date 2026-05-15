@@ -9,7 +9,7 @@
  * when an Anthropic API key is available.
  */
 
-import type { AIProvider, ClaudeProviderConfig, EscalationResult } from "./interface";
+import type { AIProvider, ClaudeProviderConfig, EscalationResult, ConversationTurn } from "./interface";
 import type { NodeCore, SyncSignal } from "../../types/core";
 import {
   buildSystemPrompt,
@@ -19,6 +19,14 @@ import {
 
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
+
+// Claude requires strictly alternating user/assistant turns starting with user.
+// Drop a leading assistant message if history is oddly shaped.
+function toClaudeMessages(history: ConversationTurn[]): { role: "user" | "assistant"; content: string }[] {
+  const msgs = history.map((t) => ({ role: t.role, content: t.content }));
+  if (msgs.length > 0 && msgs[0].role === "assistant") msgs.shift();
+  return msgs;
+}
 
 export class ClaudeProvider implements AIProvider {
   readonly name = "claude" as const;
@@ -39,10 +47,16 @@ export class ClaudeProvider implements AIProvider {
     signal: SyncSignal,
     core: NodeCore,
     patterns: { hour: number; avg_arousal: number; sample_count: number }[],
+    conversationHistory: ConversationTurn[] = [],
   ): Promise<EscalationResult> {
     const start = Date.now();
     const systemPrompt = buildSystemPrompt(core, patterns);
     const userPrompt = buildUserPrompt(userInput, signal);
+
+    // Build message array: prior turns (alternating user/assistant) + current turn.
+    // Claude requires the array to start with a user message and strictly alternate.
+    const historyMessages = toClaudeMessages(conversationHistory);
+    const messages = [...historyMessages, { role: "user" as const, content: userPrompt }];
 
     const response = await fetch(CLAUDE_API_URL, {
       method: "POST",
@@ -55,7 +69,7 @@ export class ClaudeProvider implements AIProvider {
         model: this.modelId,
         max_tokens: 600,
         system: systemPrompt,
-        messages: [{ role: "user", content: userPrompt }],
+        messages,
       }),
       signal: AbortSignal.timeout(30_000),
     });

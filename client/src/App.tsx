@@ -133,7 +133,7 @@ export default function App() {
             {(['entity', 'feed', 'settings'] as View[]).map((v) => (
               <button
                 key={v}
-                onClick={() => setActiveView(v)}
+                onClick={() => handleViewChange(v)}
                 style={{
                   padding: '6px 18px',
                   borderRadius: 8,

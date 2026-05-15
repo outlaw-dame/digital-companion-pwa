@@ -103,7 +103,7 @@ export async function processInteraction(
       if (provider) {
         try {
           const patterns = getArousalPatterns(core.id);
-          const result = await provider.escalate(promptInput, signal, core, patterns);
+          const result = await provider.escalate(promptInput, signal, core, patterns, req.conversationHistory ?? []);
 
           entityResponse = result.entityResponse;
           usedExternalApi = true;

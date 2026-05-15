@@ -15,7 +15,8 @@
  * in the ProviderRegistry (providerRegistry.ts).
  */
 
-import type { NodeCore, SyncSignal } from "../../types/core";
+import type { NodeCore, SyncSignal, ConversationTurn } from "../../types/core";
+export type { ConversationTurn };
 
 // ─── Shared Message Format ────────────────────────────────────────────────────
 // Internal canonical format for chat messages.
@@ -128,12 +129,14 @@ export interface AIProvider {
 
   /**
    * Perform escalation. Should throw on API error (the pipeline catches).
+   * conversationHistory is the trimmed prior-turn window from the client.
    */
   escalate(
     userInput: string,
     signal: SyncSignal,
     core: NodeCore,
     patterns: { hour: number; avg_arousal: number; sample_count: number }[],
+    conversationHistory: ConversationTurn[],
   ): Promise<EscalationResult>;
 }
 

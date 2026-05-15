@@ -138,12 +138,22 @@ export interface LinkPreview {
   fetchedAt: string;      // ISO timestamp
 }
 
+// ─── Conversation History ─────────────────────────────────────────────────────
+// Sent by the client with each request so providers have multi-turn context.
+// The window is capped on the client side before sending.
+
+export interface ConversationTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
 // ─── API Request/Response ────────────────────────────────────────────────────
 
 export interface InteractionRequest {
   sessionId: string;
   userInput: string;
   currentCore: NodeCore;
+  conversationHistory?: ConversationTurn[];
 }
 
 export interface InteractionResponse {

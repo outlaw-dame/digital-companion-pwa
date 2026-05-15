@@ -27,6 +27,7 @@ import type {
   CloudflareProviderConfig,
   EscalationResult,
   ChatMessage,
+  ConversationTurn,
 } from "./interface";
 import type { NodeCore, SyncSignal } from "../../types/core";
 import {
@@ -140,14 +141,15 @@ export class CloudflareProvider implements AIProvider {
     signal: SyncSignal,
     core: NodeCore,
     patterns: { hour: number; avg_arousal: number; sample_count: number }[],
+    conversationHistory: ConversationTurn[] = [],
   ): Promise<EscalationResult> {
     const start = Date.now();
     const systemPrompt = buildSystemPrompt(core, patterns);
     const userPrompt = buildUserPrompt(userInput, signal);
 
-    // Cloudflare Workers AI supports the messages format for modern models
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
+      ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
       { role: "user", content: userPrompt },
     ];
 

@@ -9,12 +9,22 @@
  * multimodal tasks (future), and as Claude fallback.
  */
 
-import type { AIProvider, GeminiProviderConfig, EscalationResult } from "./interface";
+import type { AIProvider, GeminiProviderConfig, EscalationResult, ConversationTurn } from "./interface";
 import type { NodeCore, SyncSignal } from "../../types/core";
 import { buildSystemPrompt, buildUserPrompt, parseProviderResponse } from "./interface";
 
 const DEFAULT_MODEL = "gemini-2.0-flash";
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+
+// Gemini uses 'model' for assistant turns; requires turn to start with 'user'.
+function toGeminiContents(history: ConversationTurn[]): { role: string; parts: { text: string }[] }[] {
+  const contents = history.map((t) => ({
+    role: t.role === "assistant" ? "model" : "user",
+    parts: [{ text: t.content }],
+  }));
+  if (contents.length > 0 && contents[0].role === "model") contents.shift();
+  return contents;
+}
 
 export class GeminiProvider implements AIProvider {
   readonly name = "gemini" as const;
@@ -35,10 +45,14 @@ export class GeminiProvider implements AIProvider {
     signal: SyncSignal,
     core: NodeCore,
     patterns: { hour: number; avg_arousal: number; sample_count: number }[],
+    conversationHistory: ConversationTurn[] = [],
   ): Promise<EscalationResult> {
     const start = Date.now();
     const systemPrompt = buildSystemPrompt(core, patterns);
     const userPrompt = buildUserPrompt(userInput, signal);
+
+    // Gemini uses 'model' instead of 'assistant' and requires strict alternation.
+    const historyContents = toGeminiContents(conversationHistory);
 
     const url = `${GEMINI_API_BASE}/${this.modelId}:generateContent`;
 
@@ -54,10 +68,8 @@ export class GeminiProvider implements AIProvider {
           parts: [{ text: systemPrompt }],
         },
         contents: [
-          {
-            role: "user",
-            parts: [{ text: userPrompt }],
-          },
+          ...historyContents,
+          { role: "user", parts: [{ text: userPrompt }] },
         ],
         generationConfig: {
           maxOutputTokens: 600,

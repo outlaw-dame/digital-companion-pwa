@@ -56,6 +56,8 @@ const MESSAGES_STORAGE_KEY = 'ane:messages';
 const PROVIDER_STORAGE_KEY = 'ane:preferredProvider';
 const API_BASE = '/api';
 const MAX_MESSAGES = 100;
+const HISTORY_WINDOW = 10;    // last N messages sent to server (5 exchanges)
+const HISTORY_CONTENT_CAP = 500; // max chars per historical message
 
 // Default NodeCore
 
@@ -175,6 +177,9 @@ export function useANE() {
         timestamp: new Date().toISOString(),
       };
 
+      // Capture history before the optimistic setState adds the current message.
+      const conversationHistory = extractHistory(state.messages);
+
       setState((prev) => ({
         ...prev,
         isProcessing: true,
@@ -190,6 +195,7 @@ export function useANE() {
             userInput: userInput.trim(),
             currentCore: state.core,
             preferredProvider: state.preferredProvider ?? undefined,
+            conversationHistory,
           }),
           signal: AbortSignal.timeout(15_000),
         });
@@ -358,6 +364,8 @@ export function useANE() {
       gifAttachment: gif,
     };
 
+    const conversationHistory = extractHistory(state.messages);
+
     setState((prev) => ({
       ...prev,
       isProcessing: true,
@@ -380,6 +388,7 @@ export function useANE() {
           userInput: buildGifContext(gif.title),
           currentCore: state.core,
           preferredProvider: state.preferredProvider ?? undefined,
+          conversationHistory,
         }),
         signal: AbortSignal.timeout(15_000),
       });
@@ -463,6 +472,22 @@ export function useANE() {
     clearMessages,
     setPreferredProvider,
   };
+}
+
+// ── Conversation history ──────────────────────────────────────────────────────
+
+interface ConversationTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+function extractHistory(messages: Message[]): ConversationTurn[] {
+  return messages
+    .slice(-HISTORY_WINDOW)
+    .map((m) => ({
+      role: (m.role === 'entity' ? 'assistant' : 'user') as 'user' | 'assistant',
+      content: m.content.slice(0, HISTORY_CONTENT_CAP),
+    }));
 }
 
 // ── GIF helpers ──────────────────────────────────────────────────────────────

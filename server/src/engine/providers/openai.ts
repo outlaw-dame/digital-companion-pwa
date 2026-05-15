@@ -9,7 +9,7 @@
  * Claude and Gemini, or as preferred when explicitly set.
  */
 
-import type { AIProvider, OpenAIProviderConfig, EscalationResult } from "./interface";
+import type { AIProvider, OpenAIProviderConfig, EscalationResult, ConversationTurn } from "./interface";
 import type { NodeCore, SyncSignal } from "../../types/core";
 import { buildSystemPrompt, buildUserPrompt, parseProviderResponse } from "./interface";
 
@@ -35,6 +35,7 @@ export class OpenAIProvider implements AIProvider {
     signal: SyncSignal,
     core: NodeCore,
     patterns: { hour: number; avg_arousal: number; sample_count: number }[],
+    conversationHistory: ConversationTurn[] = [],
   ): Promise<EscalationResult> {
     const start = Date.now();
     const systemPrompt = buildSystemPrompt(core, patterns);
@@ -53,6 +54,7 @@ export class OpenAIProvider implements AIProvider {
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: systemPrompt },
+          ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
           { role: "user", content: userPrompt },
         ],
       }),

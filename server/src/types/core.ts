@@ -56,6 +56,7 @@ export type ArousalValence = 'positive' | 'negative' | 'neutral';
 
 export interface ObservationRecord {
   id?: number;
+  parent_id?: number | null;     // Non-null when this message is a threaded reply
   timestamp: string;
   session_id: string;
   user_input: string;
@@ -69,6 +70,37 @@ export interface ObservationRecord {
   companion_response_state: AffectState;
   used_claude_api: boolean;
   response_latency_ms: number;
+}
+
+// ─── Feed Types ───────────────────────────────────────────────────────────────
+
+export interface FeedItem {
+  title: string | null;
+  link: string | null;
+  description: string | null;
+  publishedAt: string | null;
+  author: string | null;
+}
+
+export interface FeedContent {
+  url: string;
+  format: "rss" | "atom" | "json" | "rdf";
+  title: string | null;
+  description: string | null;
+  siteUrl: string | null;
+  items: FeedItem[];
+  fetchedAt: string;
+}
+
+// ─── Entity Linking ───────────────────────────────────────────────────────────
+
+export interface LinkedEntity {
+  surface: string;               // How it appeared in the text
+  label: string;                 // Canonical label from knowledge base
+  description: string | null;
+  wikidataUri: string | null;
+  dbpediaUri: string | null;
+  entityType: string | null;     // 'person' | 'place' | 'organization' | 'concept' | etc.
 }
 
 // ─── NodeCore ────────────────────────────────────────────────────────────────
@@ -145,6 +177,7 @@ export interface InteractionRequest {
   sessionId: string;
   userInput: string;
   currentCore: NodeCore;
+  parentObservationId?: number;  // Set when replying within a thread
 }
 
 export interface InteractionResponse {
@@ -155,7 +188,10 @@ export interface InteractionResponse {
   usedClaudeApi: boolean;
   shouldCreateAnchor: boolean;
   linkPreviews: LinkPreview[];   // Empty array when no URLs found
+  feedPreviews: FeedContent[];   // Feed content discovered from URLs in input
+  linkedEntities: LinkedEntity[]; // Entities linked via Wikidata/DBpedia
   observationId: number;         // SQLite rowid — client uses this to target DELETE /api/observations/:id
+  parentObservationId: number | null; // Mirrors the request's parentObservationId
 }
 
 // ─── Capability Tier Thresholds ──────────────────────────────────────────────

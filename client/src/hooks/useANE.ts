@@ -31,13 +31,14 @@ export interface Message {
   role: 'user' | 'entity';
   content: string;
   timestamp: string;
-  observationId?: number;        // Server DB rowid — present when server-processed; used for deletion
+  observationId?: number;           // Server DB rowid — present when server-processed; used for deletion
+  parentObservationId?: number | null; // Non-null when this is a threaded reply
   affectState?: AffectState;
   usedExternalApi?: boolean;
   providerUsed?: ProviderName;
   modelUsed?: string;
-  linkPreviews?: LinkPreview[];  // Populated on user messages that contained URLs
-  gifAttachment?: GifAttachment; // Populated when user sends a GIF
+  linkPreviews?: LinkPreview[];     // Populated on user messages that contained URLs
+  gifAttachment?: GifAttachment;    // Populated when user sends a GIF
 }
 
 export interface ANEState {
@@ -48,6 +49,7 @@ export interface ANEState {
   serverOnline: boolean;
   sessionId: string;
   preferredProvider: ProviderName | null;
+  replyingTo: Message | null;       // Message being replied to — sets thread context
 }
 
 // Constants
@@ -126,6 +128,7 @@ export function useANE() {
       serverOnline: false,
       sessionId,
       preferredProvider,
+      replyingTo: null,
     };
   });
 
@@ -169,16 +172,20 @@ export function useANE() {
     async (userInput: string) => {
       if (!userInput.trim() || state.isProcessing || !state.core) return;
 
+      const parentObsId = state.replyingTo?.observationId ?? undefined;
+
       const userMsg: Message = {
         id: crypto.randomUUID(),
         role: 'user',
         content: userInput.trim(),
         timestamp: new Date().toISOString(),
+        parentObservationId: parentObsId ?? null,
       };
 
       setState((prev) => ({
         ...prev,
         isProcessing: true,
+        replyingTo: null,
         messages: [...prev.messages, userMsg].slice(-MAX_MESSAGES),
       }));
 
@@ -191,6 +198,7 @@ export function useANE() {
             userInput: userInput.trim(),
             currentCore: state.core,
             preferredProvider: state.preferredProvider ?? undefined,
+            parentObservationId: parentObsId,
           }),
           signal: AbortSignal.timeout(15_000),
         });
@@ -207,12 +215,14 @@ export function useANE() {
           modelUsed?: string;
           linkPreviews?: LinkPreview[];
           observationId?: number;
+          parentObservationId?: number | null;
         };
 
-        // Attach link previews and observationId to user message
-        const userMsgWithPreviews: Message = {
+        // Attach link previews, observationId, and parent thread info to user message
+        const userMsgFull: Message = {
           ...userMsg,
           observationId: data.observationId,
+          parentObservationId: data.parentObservationId ?? null,
           linkPreviews: data.linkPreviews?.length ? data.linkPreviews : undefined,
         };
 
@@ -222,6 +232,7 @@ export function useANE() {
           content: data.entityResponse,
           timestamp: new Date().toISOString(),
           observationId: data.observationId,
+          parentObservationId: data.parentObservationId ?? null,
           affectState: data.affectState,
           usedExternalApi: data.usedClaudeApi,
           providerUsed: data.providerUsed,
@@ -229,9 +240,9 @@ export function useANE() {
         };
 
         setState((prev) => {
-          // Replace the optimistic user message with the one carrying link previews
+          // Replace the optimistic user message with the enriched version
           const msgs = prev.messages.map((m) =>
-            m.id === userMsg.id ? userMsgWithPreviews : m,
+            m.id === userMsg.id ? userMsgFull : m,
           );
           return {
             ...prev,
@@ -263,7 +274,7 @@ export function useANE() {
         }));
       }
     },
-    [state.core, state.isProcessing, state.preferredProvider, sessionId],
+    [state.core, state.isProcessing, state.preferredProvider, state.replyingTo, sessionId],
   );
 
   // Client-side inference path — bypasses server entirely.
@@ -443,6 +454,12 @@ export function useANE() {
     }
   }, [state.core, state.isProcessing, state.preferredProvider, sessionId]);
 
+  // Set reply target — UI calls this when user taps Reply on a message
+
+  const setReplyingTo = useCallback((msg: Message | null) => {
+    setState((prev) => ({ ...prev, replyingTo: msg }));
+  }, []);
+
   // Set preferred provider
 
   const setPreferredProvider = useCallback((provider: ProviderName | null) => {
@@ -506,6 +523,7 @@ export function useANE() {
     sendGif,
     clearMessages,
     deleteMessage,
+    setReplyingTo,
     setPreferredProvider,
   };
 }

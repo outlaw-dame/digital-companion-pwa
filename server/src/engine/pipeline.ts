@@ -33,6 +33,7 @@ import {
   addMemoryAnchor,
   getArousalPatterns,
   getRecentConversation,
+  getThreadContext,
   getLastObservation,
   deleteObservation,
 } from "../db/kernel";
@@ -47,8 +48,9 @@ import { resolveRouting } from "./router";
 import { detectExplicitMemoryRequest, detectDeleteRequest } from "./memoryDetection";
 import { checkDeletionSafety, safetyHoldResponse } from "./safetyGate";
 import { processLinks, formatLinksForPrompt } from "./linkProcessor";
+import { processFeedsFromText, formatFeedsForPrompt } from "./feedProcessor";
+import { linkEntities, formatEntitiesForPrompt } from "./entityLinker";
 import type { ProviderName } from "./providers/interface";
-import type { LinkPreview } from "../types/core";
 
 const LOCAL_CONFIDENCE_THRESHOLD = 0.75;
 
@@ -68,8 +70,6 @@ export interface ExtendedInteractionRequest extends InteractionRequest {
 export interface PipelineResult extends InteractionResponse {
   providerUsed: ProviderName;
   modelUsed: string;
-  linkPreviews: LinkPreview[];
-  observationId: number;
 }
 
 export async function processInteraction(
@@ -141,6 +141,9 @@ export async function processInteraction(
       usedClaudeApi: false,
       shouldCreateAnchor: false,
       linkPreviews: [],
+      feedPreviews: [],
+      linkedEntities: [],
+      parentObservationId: req.parentObservationId ?? null,
       providerUsed: "local",
       modelUsed: "delete-gate-v1",
       observationId: obsId,
@@ -212,27 +215,36 @@ export async function processInteraction(
       usedClaudeApi: false,
       shouldCreateAnchor: true,
       linkPreviews: [],
+      feedPreviews: [],
+      linkedEntities: [],
+      parentObservationId: req.parentObservationId ?? null,
       providerUsed: "local",
       modelUsed: "memory-anchor-v1",
       observationId: memObsId,
     };
   }
 
-  // 3. Local signal processing + link processing (run concurrently — independent)
-  const [signal, linkPreviews] = await Promise.all([
+  // 3. Parallel: local signal + link previews + feed content + entity linking
+  //    All are independent; run concurrently to minimize wall-clock latency.
+  const [signal, linkPreviews, feedPreviews, linkedEntities] = await Promise.all([
     Promise.resolve(processLocally(req.userInput, core)),
     processLinks(req.userInput, process.env.GOOGLE_SAFE_BROWSING_API_KEY),
+    processFeedsFromText(req.userInput),
+    linkEntities(req.userInput),
   ]);
 
-  // Augmented input: append OG context so the AI has awareness of shared links.
-  // The original req.userInput is preserved for DB logging.
-  const linkContext = formatLinksForPrompt(linkPreviews);
-  const promptInput = linkContext ? `${req.userInput}\n${linkContext}` : req.userInput;
+  // Augment prompt with all enriched context; original userInput is preserved for logging.
+  const linkContext   = formatLinksForPrompt(linkPreviews);
+  const feedContext   = formatFeedsForPrompt(feedPreviews);
+  const entityContext = formatEntitiesForPrompt(linkedEntities);
+  const augmentation  = [linkContext, feedContext, entityContext].filter(Boolean).join("\n");
+  const promptInput   = augmentation ? `${req.userInput}\n${augmentation}` : req.userInput;
 
-  // Retrieve recent conversation from local SQLite — never from the client.
-  // Cloud providers get last 3 exchanges; local/Ollama runs on-device so the
-  // limit is purely for prompt size, not privacy.
-  const conversationHistory = getRecentConversation(core.id, 3);
+  // Conversation history: use thread chain when replying to a specific message,
+  // otherwise fall back to recent global conversation.
+  const conversationHistory = req.parentObservationId != null
+    ? getThreadContext(req.parentObservationId, 5)
+    : getRecentConversation(core.id, 3);
 
   // 4. Response generation
   let entityResponse: string;
@@ -314,6 +326,7 @@ export async function processInteraction(
   // 7. Log observation — entity_response stored locally for future context retrieval
   const latency = Date.now() - startMs;
   const observationId = logObservation(core.id, {
+    parent_id: req.parentObservationId ?? null,
     timestamp: new Date().toISOString(),
     session_id: req.sessionId,
     user_input: req.userInput,
@@ -353,6 +366,9 @@ export async function processInteraction(
     usedClaudeApi: usedExternalApi,
     shouldCreateAnchor,
     linkPreviews,
+    feedPreviews,
+    linkedEntities,
+    parentObservationId: req.parentObservationId ?? null,
     providerUsed,
     modelUsed,
     observationId,

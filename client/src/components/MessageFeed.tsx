@@ -19,9 +19,10 @@ interface MessageFeedProps {
   messages: Message[];
   entityDesignation: string;
   onDeleteMessage: (messageId: string) => Promise<{ deleted: boolean; safetyMessage?: string }>;
+  onReplyMessage: (message: Message) => void;
 }
 
-export function MessageFeed({ messages, entityDesignation, onDeleteMessage }: MessageFeedProps) {
+export function MessageFeed({ messages, entityDesignation, onDeleteMessage, onReplyMessage }: MessageFeedProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom on new messages
@@ -50,6 +51,7 @@ export function MessageFeed({ messages, entityDesignation, onDeleteMessage }: Me
           message={msg}
           entityDesignation={entityDesignation}
           onDelete={onDeleteMessage}
+          onReply={onReplyMessage}
         />
       ))}
       <div ref={bottomRef} />
@@ -63,10 +65,12 @@ function MessageBubble({
   message,
   entityDesignation,
   onDelete,
+  onReply,
 }: {
   message: Message;
   entityDesignation: string;
   onDelete: (id: string) => Promise<{ deleted: boolean; safetyMessage?: string }>;
+  onReply: (msg: Message) => void;
 }) {
   const isUser = message.role === 'user';
   const ts = formatTimestamp(message.timestamp);
@@ -75,6 +79,7 @@ function MessageBubble({
   const [safetyMsg, setSafetyMsg] = useState<string | null>(null);
 
   const canDelete = Boolean(message.observationId);
+  const canReply  = Boolean(message.observationId);
 
   const handleDelete = useCallback(async () => {
     if (!canDelete || deleting) return;
@@ -97,6 +102,11 @@ function MessageBubble({
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => { setHovered(false); setSafetyMsg(null); }}
       >
+        {/* Thread indicator — shown when this is a reply */}
+        {message.parentObservationId != null && (
+          <ThreadIndicator align="right" />
+        )}
+
         {/* GIF attachment */}
         {message.gifAttachment && (
           <GifBubble gif={message.gifAttachment} align="right" ts={ts} />
@@ -105,9 +115,12 @@ function MessageBubble({
         {/* Text bubble */}
         {!isGifOnly && (
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
-            {/* Delete button — appears on hover, left of the bubble */}
-            {hovered && canDelete && (
-              <DeleteButton deleting={deleting} onClick={handleDelete} />
+            {/* Action buttons — appear on hover, left of the bubble */}
+            {hovered && (
+              <div style={{ display: 'flex', gap: 4 }}>
+                {canReply && <ReplyButton onClick={() => onReply(message)} />}
+                {canDelete && <DeleteButton deleting={deleting} onClick={handleDelete} />}
+              </div>
             )}
             <div
               className="max-w-[75%] px-4 py-3 rounded-[20px] rounded-tr-[6px]"
@@ -157,6 +170,11 @@ function MessageBubble({
     >
       <div className="flex flex-col gap-1 max-w-[80%]">
 
+        {/* Thread indicator — shown when this is a reply */}
+        {message.parentObservationId != null && (
+          <ThreadIndicator align="left" />
+        )}
+
         {/* Entity label + affect indicator */}
         <div className="flex items-center gap-2 pl-1">
           <span
@@ -193,7 +211,7 @@ function MessageBubble({
           )}
         </div>
 
-        {/* Bubble + delete button */}
+        {/* Bubble + action buttons */}
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
           <div
             className="px-4 py-3 rounded-[20px] rounded-tl-[6px]"
@@ -215,9 +233,12 @@ function MessageBubble({
               {ts}
             </div>
           </div>
-          {/* Delete button — appears on hover, right of the entity bubble */}
-          {hovered && canDelete && (
-            <DeleteButton deleting={deleting} onClick={handleDelete} />
+          {/* Action buttons — appear on hover, right of the entity bubble */}
+          {hovered && (
+            <div style={{ display: 'flex', gap: 4 }}>
+              {canReply && <ReplyButton onClick={() => onReply(message)} />}
+              {canDelete && <DeleteButton deleting={deleting} onClick={handleDelete} />}
+            </div>
           )}
         </div>
 
@@ -225,6 +246,77 @@ function MessageBubble({
         {safetyMsg && <SafetyNotice message={safetyMsg} />}
       </div>
     </div>
+  );
+}
+
+// ─── Thread Indicator ─────────────────────────────────────────────────────────
+
+function ThreadIndicator({ align }: { align: 'left' | 'right' }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        justifyContent: align === 'right' ? 'flex-end' : 'flex-start',
+        paddingLeft: align === 'left' ? 12 : 0,
+        paddingRight: align === 'right' ? 12 : 0,
+      }}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+        <path
+          d="M1 1 L1 6 Q1 9 4 9 L9 9"
+          stroke="rgba(255,255,255,0.25)"
+          strokeWidth="1.2"
+          strokeLinecap="round"
+          fill="none"
+        />
+      </svg>
+      <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', fontFamily: 'var(--font-mono)' }}>
+        reply
+      </span>
+    </div>
+  );
+}
+
+// ─── Reply Button ─────────────────────────────────────────────────────────────
+
+function ReplyButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title="Reply in thread"
+      aria-label="Reply in thread"
+      style={{
+        flexShrink: 0,
+        width: 26,
+        height: 26,
+        borderRadius: '50%',
+        border: '1px solid rgba(255,255,255,0.10)',
+        background: 'rgba(255,255,255,0.04)',
+        color: 'rgba(255,255,255,0.35)',
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        transition: 'color 0.15s ease, background 0.15s ease',
+        padding: 0,
+        lineHeight: 1,
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.color = 'rgba(124,107,255,0.9)';
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.color = 'rgba(255,255,255,0.35)';
+      }}
+    >
+      <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path
+          d="M1 5 L6 1 L6 3.5 C9 3.5 10 5.5 10 8 C9 6.5 7.5 5.5 6 5.5 L6 8 Z"
+          fill="currentColor"
+        />
+      </svg>
+    </button>
   );
 }
 

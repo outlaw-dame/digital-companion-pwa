@@ -11,6 +11,7 @@
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { SendIcon } from './AppIcons';
+import type { Message } from '../hooks/useANE';
 
 interface SyncInputProps {
   onSend: (text: string) => void;
@@ -19,6 +20,8 @@ interface SyncInputProps {
   placeholder?: string;
   gifOpen?: boolean;
   onGifToggle?: () => void;
+  replyingTo?: Message | null;
+  onCancelReply?: () => void;
 }
 
 export function SyncInput({
@@ -28,6 +31,8 @@ export function SyncInput({
   placeholder = 'Sync your thoughts…',
   gifOpen = false,
   onGifToggle,
+  replyingTo,
+  onCancelReply,
 }: SyncInputProps) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -69,7 +74,6 @@ export function SyncInput({
 
   return (
     <div
-      className="flex items-end gap-3 px-4 py-3"
       style={{
         background: 'rgba(20, 20, 31, 0.85)',
         backdropFilter: 'blur(20px) saturate(180%)',
@@ -77,6 +81,56 @@ export function SyncInput({
         borderTop: '1px solid var(--ane-border)',
       }}
     >
+      {/* Reply banner — shown when replying to a specific message */}
+      {replyingTo && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '6px 16px',
+            borderBottom: '1px solid rgba(255,255,255,0.06)',
+            background: 'rgba(124,107,255,0.06)',
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ flexShrink: 0 }}>
+            <path d="M1 1 L1 6 Q1 9 4 9 L9 9" stroke="rgba(124,107,255,0.7)" strokeWidth="1.2" strokeLinecap="round" fill="none"/>
+          </svg>
+          <span
+            style={{
+              flex: 1,
+              fontSize: 12,
+              color: 'rgba(255,255,255,0.45)',
+              fontFamily: 'var(--font-mono)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {replyingTo.content.slice(0, 80)}{replyingTo.content.length > 80 ? '…' : ''}
+          </span>
+          {onCancelReply && (
+            <button
+              onClick={onCancelReply}
+              aria-label="Cancel reply"
+              style={{
+                flexShrink: 0,
+                background: 'none',
+                border: 'none',
+                padding: 2,
+                cursor: 'pointer',
+                color: 'rgba(255,255,255,0.3)',
+                lineHeight: 1,
+              }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+              </svg>
+            </button>
+          )}
+        </div>
+      )}
+      <div className="flex items-end gap-3 px-4 py-3">
       {/* GIF button */}
       {onGifToggle && (
         <button
@@ -177,6 +231,7 @@ export function SyncInput({
           <SendIcon size={16} color="white" />
         )}
       </button>
+      </div>
     </div>
   );
 }

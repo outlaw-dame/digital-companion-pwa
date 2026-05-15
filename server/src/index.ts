@@ -369,6 +369,12 @@ app.post("/api/interact", async (c) => {
     return c.json({ error: "sessionId must be a valid UUID" }, 400);
   }
 
+  if (body.parentObservationId !== undefined) {
+    if (!Number.isInteger(body.parentObservationId) || body.parentObservationId <= 0) {
+      return c.json({ error: "parentObservationId must be a positive integer" }, 400);
+    }
+  }
+
   try {
     const result = await processInteraction(body);
     return c.json(result);

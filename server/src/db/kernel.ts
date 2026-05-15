@@ -17,6 +17,9 @@ import type {
   ObservationRecord,
   MemoryAnchor,
   CapabilityTier,
+  FeedContent,
+  FeedItem,
+  LinkedEntity,
 } from "../types/core";
 import {
   RESILIENCE_DECAY_PER_HOUR,
@@ -83,6 +86,7 @@ function initSchema(db: Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS observations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      parent_id INTEGER,
       timestamp TEXT NOT NULL,
       session_id TEXT NOT NULL,
       user_input TEXT NOT NULL,
@@ -100,24 +104,48 @@ function initSchema(db: Database): void {
     )
   `);
 
-  // Migrate existing databases — add entity_response if the column doesn't exist yet.
-  // Try-catch is more portable than IF NOT EXISTS (not supported in all SQLite versions).
-  try {
-    db.exec(`ALTER TABLE observations ADD COLUMN entity_response TEXT NOT NULL DEFAULT ''`);
-  } catch {
-    // Column already exists — migration already applied, safe to continue
+  // Feed cache: short-lived cache of parsed feed content keyed by URL
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feed_cache (
+      url TEXT PRIMARY KEY,
+      feed_title TEXT,
+      feed_format TEXT NOT NULL,
+      feed_description TEXT,
+      site_url TEXT,
+      items_json TEXT NOT NULL,
+      fetched_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    )
+  `);
+
+  // Entity cache: knowledge-base lookups keyed by lower-cased surface form
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entity_cache (
+      surface_form TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      description TEXT,
+      wikidata_uri TEXT,
+      dbpedia_uri TEXT,
+      entity_type TEXT,
+      fetched_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    )
+  `);
+
+  // Migrations for existing databases (try-catch for portability)
+  for (const migration of [
+    `ALTER TABLE observations ADD COLUMN entity_response TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE observations ADD COLUMN parent_id INTEGER`,
+  ]) {
+    try { db.exec(migration); } catch { /* column exists — skip */ }
   }
 
-  // Index for temporal queries (pattern detection over time)
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_observations_timestamp
-    ON observations(node_id, timestamp);
-  `);
-
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_observations_session
-    ON observations(session_id);
-  `);
+  // Indexes for temporal queries and thread traversal
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_timestamp ON observations(node_id, timestamp)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_parent ON observations(parent_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_entity_cache_expires ON entity_cache(expires_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_feed_cache_expires ON feed_cache(expires_at)`);
 }
 
 // ─── NodeCore CRUD ────────────────────────────────────────────────────────────
@@ -192,12 +220,13 @@ export function logObservation(
   const db = getDb();
   const result = db.query(`
     INSERT INTO observations (
-      timestamp, session_id, user_input, entity_response, arousal_level, valence,
-      affect_state, eq_domain_targeted, capability_tier_at_time,
+      parent_id, timestamp, session_id, user_input, entity_response, arousal_level,
+      valence, affect_state, eq_domain_targeted, capability_tier_at_time,
       sync_score, companion_response_state, used_claude_api,
       response_latency_ms, node_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
+    record.parent_id ?? null,
     record.timestamp,
     record.session_id,
     record.user_input,
@@ -305,6 +334,135 @@ export function getRecentConversation(
       { role: "user" as const,      content: r.user_input.slice(0, 500) },
       { role: "assistant" as const, content: r.entity_response.slice(0, 500) },
     ]);
+}
+
+/**
+ * Returns the conversation chain for a threaded reply, walking up parent_id
+ * links using a recursive CTE. Returns turns in chronological order.
+ * Used instead of getRecentConversation when a reply targets a specific thread.
+ */
+export function getThreadContext(
+  parentObservationId: number,
+  limit = 5,
+): ConversationTurn[] {
+  const db = getDb();
+  // Walk from parentObservationId upward through parent_id links
+  const rows = db.query(`
+    WITH RECURSIVE chain AS (
+      SELECT id, user_input, entity_response, parent_id, 1 AS depth
+      FROM observations WHERE id = ?
+      UNION ALL
+      SELECT o.id, o.user_input, o.entity_response, o.parent_id, c.depth + 1
+      FROM observations o
+      INNER JOIN chain c ON o.id = c.parent_id
+      WHERE c.parent_id IS NOT NULL AND c.depth < ?
+    )
+    SELECT id, user_input, entity_response FROM chain ORDER BY id ASC
+  `).all(parentObservationId, limit) as {
+    id: number;
+    user_input: string;
+    entity_response: string;
+  }[];
+
+  return rows.flatMap((r) => [
+    { role: "user" as const,      content: r.user_input.slice(0, 500) },
+    { role: "assistant" as const, content: r.entity_response.slice(0, 500) },
+  ]);
+}
+
+// ─── Feed Cache ────────────────────────────────────────────────────────────────
+
+export function getFeedCache(url: string): FeedContent | null {
+  const db = getDb();
+  const row = db.query(`
+    SELECT * FROM feed_cache WHERE url = ? AND expires_at > datetime('now')
+  `).get(url) as Record<string, unknown> | null;
+  if (!row) return null;
+  try {
+    return {
+      url: row.url as string,
+      format: row.feed_format as FeedContent["format"],
+      title: row.feed_title as string | null,
+      description: row.feed_description as string | null,
+      siteUrl: row.site_url as string | null,
+      items: JSON.parse(row.items_json as string) as FeedItem[],
+      fetchedAt: row.fetched_at as string,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function upsertFeedCache(content: FeedContent, ttlSeconds = 1800): void {
+  const db = getDb();
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+  db.query(`
+    INSERT INTO feed_cache (url, feed_title, feed_format, feed_description, site_url, items_json, fetched_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(url) DO UPDATE SET
+      feed_title=excluded.feed_title, feed_format=excluded.feed_format,
+      feed_description=excluded.feed_description, site_url=excluded.site_url,
+      items_json=excluded.items_json, fetched_at=excluded.fetched_at,
+      expires_at=excluded.expires_at
+  `).run(
+    content.url,
+    content.title,
+    content.format,
+    content.description,
+    content.siteUrl,
+    JSON.stringify(content.items),
+    content.fetchedAt,
+    expiresAt,
+  );
+}
+
+export function evictExpiredFeedCache(): void {
+  getDb().exec(`DELETE FROM feed_cache WHERE expires_at <= datetime('now')`);
+}
+
+// ─── Entity Cache ─────────────────────────────────────────────────────────────
+
+export function getEntityCache(surfaceForm: string): LinkedEntity | null {
+  const db = getDb();
+  const row = db.query(`
+    SELECT * FROM entity_cache
+    WHERE surface_form = ? AND expires_at > datetime('now')
+  `).get(surfaceForm.toLowerCase()) as Record<string, unknown> | null;
+  if (!row) return null;
+  return {
+    surface: surfaceForm,
+    label: row.label as string,
+    description: row.description as string | null,
+    wikidataUri: row.wikidata_uri as string | null,
+    dbpediaUri: row.dbpedia_uri as string | null,
+    entityType: row.entity_type as string | null,
+  };
+}
+
+export function upsertEntityCache(entity: LinkedEntity, ttlSeconds = 604_800): void {
+  const db = getDb();
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+  db.query(`
+    INSERT INTO entity_cache (surface_form, label, description, wikidata_uri, dbpedia_uri, entity_type, fetched_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    ON CONFLICT(surface_form) DO UPDATE SET
+      label=excluded.label, description=excluded.description,
+      wikidata_uri=excluded.wikidata_uri, dbpedia_uri=excluded.dbpedia_uri,
+      entity_type=excluded.entity_type, fetched_at=excluded.fetched_at,
+      expires_at=excluded.expires_at
+  `).run(
+    entity.surface.toLowerCase(),
+    entity.label,
+    entity.description,
+    entity.wikidataUri,
+    entity.dbpediaUri,
+    entity.entityType,
+    expiresAt,
+  );
+}
+
+export function evictExpiredEntityCache(): void {
+  getDb().exec(`DELETE FROM entity_cache WHERE expires_at <= datetime('now')`);
 }
 
 // ─── Pattern Queries ──────────────────────────────────────────────────────────

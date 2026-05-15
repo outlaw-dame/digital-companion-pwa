@@ -240,6 +240,7 @@ export default function App() {
               messages={ane.messages}
               entityDesignation={core.designation}
               onDeleteMessage={ane.deleteMessage}
+              onReplyMessage={ane.setReplyingTo}
             />
           )}
 
@@ -316,6 +317,8 @@ export default function App() {
             placeholder={`Sync with ${core.designation}\u2026`}
             gifOpen={gifKeyboardOpen}
             onGifToggle={() => setGifKeyboardOpen((o) => !o)}
+            replyingTo={ane.replyingTo}
+            onCancelReply={() => ane.setReplyingTo(null)}
           />
         </div>
       </div>

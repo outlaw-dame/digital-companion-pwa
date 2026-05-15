@@ -1,0 +1,348 @@
+/**
+ * ANE Server — Hono HTTP API
+ *
+ * Endpoints:
+ *   POST /api/interact                  — Main interaction pipeline
+ *   GET  /api/core/:id                  — Fetch current NodeCore state
+ *   GET  /api/patterns/:id              — Arousal patterns (longitudinal)
+ *   GET  /api/providers                 — Available provider status
+ *   GET  /api/providers/models/cloudflare — Cloudflare model catalog
+ *   GET  /api/health                    — Liveness check
+ *
+ * Supports: Claude (Anthropic), Cloudflare Workers AI, Ollama, local-only.
+ */
+
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { logger } from "hono/logger";
+import { processInteraction } from "./engine/pipeline";
+import { getNodeCore, getArousalPatterns } from "./db/kernel";
+import { getRegistry } from "./engine/providers/registry";
+import { CLOUDFLARE_MODELS } from "./engine/providers/cloudflare";
+import { processLinks } from "./engine/linkProcessor";
+import { getKlipyClient, isKlipyAvailable } from "./engine/klipyClient";
+import type { InteractionRequest } from "./types/core";
+import type { ProviderName } from "./engine/providers/interface";
+
+const app = new Hono();
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const MAX_BODY_BYTES    = 64 * 1024;   // 64 KB — generous for any real conversation turn
+const MAX_INPUT_CHARS   = 4_000;       // ~3× typical paragraph; beyond this is abuse
+const MAX_DESIGNATION   = 64;
+const UUID_RE           = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Per-IP rate limiters — prevent proxy abuse on media and link endpoints.
+function makeRateLimiter(limit: number, windowMs: number) {
+  const map = new Map<string, { count: number; windowStart: number }>();
+  return (ip: string): boolean => {
+    const now = Date.now();
+    const entry = map.get(ip);
+    if (!entry || now - entry.windowStart > windowMs) {
+      map.set(ip, { count: 1, windowStart: now });
+      return true;
+    }
+    if (entry.count >= limit) return false;
+    entry.count++;
+    return true;
+  };
+}
+
+const allowPreviewRequest = makeRateLimiter(20, 60_000);
+const allowMediaRequest   = makeRateLimiter(60, 60_000);  // GIF keyboard fetches in bursts
+
+function clientIp(req: { header(name: string): string | undefined }): string {
+  return (
+    req.header("x-forwarded-for")?.split(",")[0].trim() ??
+    req.header("x-real-ip") ??
+    "unknown"
+  );
+}
+
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+// Configurable via ALLOWED_ORIGINS env var (comma-separated).
+// Dev default allows localhost. Set explicitly in production.
+
+const rawOrigins = process.env.ALLOWED_ORIGINS ?? "";
+const allowedOrigins: string[] = rawOrigins.trim()
+  ? rawOrigins.split(",").map((o) => o.trim()).filter(Boolean)
+  : ["http://localhost:5173", "http://localhost:4173", "http://localhost:3000"];
+
+// ─── Middleware ───────────────────────────────────────────────────────────────
+
+app.use("*", logger());
+app.use(
+  "*",
+  cors({
+    origin: allowedOrigins,
+    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowHeaders: ["Content-Type"],
+  }),
+);
+
+// Cross-Origin isolation — required for WebLLM SharedArrayBuffer (WebGPU multi-threading).
+// Without these headers, WebLLM throws "SharedArrayBuffer is not defined".
+// In production, set these on your static file server / CDN as well.
+app.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  c.res.headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+  c.res.headers.set("X-Content-Type-Options", "nosniff");
+});
+
+// Request size guard — reject oversized bodies before parsing JSON.
+app.use("/api/interact", async (c, next) => {
+  const contentLength = Number(c.req.header("content-length") ?? 0);
+  if (contentLength > MAX_BODY_BYTES) {
+    return c.json({ error: "Request body too large" }, 413);
+  }
+  const ct = c.req.header("content-type") ?? "";
+  if (!ct.includes("application/json")) {
+    return c.json({ error: "Content-Type must be application/json" }, 415);
+  }
+  await next();
+});
+
+
+// ─── Health ───────────────────────────────────────────────────────────────────
+
+app.get("/api/health", (c) => {
+  const registry = getRegistry();
+  const primary = registry.getPrimaryProvider();
+  return c.json({
+    status: "operational",
+    primaryProvider: primary?.name ?? "local",
+    availableProviderCount: registry.getAvailableCount(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ─── Providers ────────────────────────────────────────────────────────────────
+
+app.get("/api/providers", (c) => {
+  const registry = getRegistry();
+  return c.json(registry.getStatus());
+});
+
+app.get("/api/providers/models/cloudflare", (_c) => {
+  return Response.json(CLOUDFLARE_MODELS);
+});
+
+// ─── Link Preview (standalone) ───────────────────────────────────────────────
+// Client can call this to get OG previews for URLs before or outside of an interaction.
+
+app.post("/api/links/preview", async (c) => {
+  if (!allowPreviewRequest(clientIp(c.req))) {
+    return c.json({ error: "Too many requests" }, 429);
+  }
+
+  const contentType = c.req.header("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    return c.json({ error: "Content-Type must be application/json" }, 415);
+  }
+
+  let body: { urls?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  if (!Array.isArray(body.urls) || body.urls.length === 0) {
+    return c.json({ error: "urls must be a non-empty array" }, 400);
+  }
+
+  const input = body.urls
+    .filter((u): u is string => typeof u === "string")
+    .slice(0, 5)
+    .join(" ");
+
+  const previews = await processLinks(input, process.env.GOOGLE_SAFE_BROWSING_API_KEY);
+  return c.json({ previews });
+});
+
+// ─── GIF Media Proxy ─────────────────────────────────────────────────────────
+// Proxies Klipy API so the API key is never exposed to the client.
+// Scope: GIF keyboard only — search, trending, categories, share trigger.
+
+const VALID_RATINGS = new Set(["g", "pg", "pg-13", "r"]);
+const KLIPY_SLUG_RE = /^[a-zA-Z0-9_-]{1,200}$/;
+
+function safeRating(raw: string | undefined): string {
+  return VALID_RATINGS.has(raw ?? "") ? raw! : "g";
+}
+
+function safePage(raw: string | undefined, fallback = 1): number {
+  const n = parseInt(raw ?? "", 10);
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 1000) : fallback;
+}
+
+function safePerPage(raw: string | undefined, fallback = 24): number {
+  const n = parseInt(raw ?? "", 10);
+  return Number.isFinite(n) ? Math.min(50, Math.max(8, n)) : fallback;
+}
+
+app.get("/api/media/gifs/trending", async (c) => {
+  if (!allowMediaRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
+  const klipy = getKlipyClient();
+  if (!klipy) return c.json({ error: "GIF service not configured" }, 503);
+  const page     = safePage(c.req.query("page"));
+  const per_page = safePerPage(c.req.query("per_page"));
+  const rating   = safeRating(c.req.query("rating"));
+  try {
+    const data = await klipy.trending({ page, per_page, rating });
+    if (data.result !== true || !Array.isArray(data.data?.data)) {
+      console.error("[klipy] trending: unexpected response shape");
+      return c.json({ error: "GIF fetch failed" }, 502);
+    }
+    return c.json(data);
+  } catch (err) {
+    console.error("[klipy] trending failed:", err);
+    return c.json({ error: "GIF fetch failed" }, 502);
+  }
+});
+
+app.get("/api/media/gifs/search", async (c) => {
+  if (!allowMediaRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
+  const klipy = getKlipyClient();
+  if (!klipy) return c.json({ error: "GIF service not configured" }, 503);
+  const q = (c.req.query("q") ?? "").trim().slice(0, 200);
+  if (!q) return c.json({ error: "q is required" }, 400);
+  const page     = safePage(c.req.query("page"));
+  const per_page = safePerPage(c.req.query("per_page"));
+  const rating   = safeRating(c.req.query("rating"));
+  try {
+    const data = await klipy.search(q, { page, per_page, rating });
+    if (data.result !== true || !Array.isArray(data.data?.data)) {
+      console.error("[klipy] search: unexpected response shape");
+      return c.json({ error: "GIF search failed" }, 502);
+    }
+    return c.json(data);
+  } catch (err) {
+    console.error("[klipy] search failed:", err);
+    return c.json({ error: "GIF search failed" }, 502);
+  }
+});
+
+app.get("/api/media/gifs/categories", async (c) => {
+  if (!allowMediaRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
+  const klipy = getKlipyClient();
+  if (!klipy) return c.json({ error: "GIF service not configured" }, 503);
+  try {
+    const data = await klipy.categories();
+    if (data.result !== true || !Array.isArray(data.data)) {
+      console.error("[klipy] categories: unexpected response shape");
+      return c.json({ error: "GIF categories failed" }, 502);
+    }
+    return c.json(data);
+  } catch (err) {
+    console.error("[klipy] categories failed:", err);
+    return c.json({ error: "GIF categories failed" }, 502);
+  }
+});
+
+app.post("/api/media/gifs/:slug/share", async (c) => {
+  const klipy = getKlipyClient();
+  if (!klipy) return c.json({ ok: false }, 200); // silently no-op if not configured
+  const { slug } = c.req.param();
+  if (!slug || !KLIPY_SLUG_RE.test(slug)) return c.json({ error: "Invalid slug" }, 400);
+  klipy.share(slug); // fire-and-forget
+  return c.json({ ok: true });
+});
+
+app.get("/api/media/status", (c) => {
+  return c.json({ gifAvailable: isKlipyAvailable() });
+});
+
+// ─── Interact ─────────────────────────────────────────────────────────────────
+
+app.post("/api/interact", async (c) => {
+  let body: InteractionRequest & { preferredProvider?: ProviderName };
+
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const input = body.userInput?.trim() ?? "";
+  if (!input) {
+    return c.json({ error: "userInput is required" }, 400);
+  }
+  if (input.length > MAX_INPUT_CHARS) {
+    return c.json({ error: `userInput exceeds ${MAX_INPUT_CHARS} characters` }, 400);
+  }
+
+  if (!body.currentCore?.id || !body.currentCore?.designation) {
+    return c.json({ error: "currentCore.id and currentCore.designation are required" }, 400);
+  }
+  if (!UUID_RE.test(body.currentCore.id)) {
+    return c.json({ error: "currentCore.id must be a valid UUID" }, 400);
+  }
+  if (typeof body.currentCore.designation !== "string" ||
+      body.currentCore.designation.trim().length === 0 ||
+      body.currentCore.designation.length > MAX_DESIGNATION) {
+    return c.json({ error: "currentCore.designation is invalid" }, 400);
+  }
+
+  if (!body.sessionId || !UUID_RE.test(body.sessionId)) {
+    return c.json({ error: "sessionId must be a valid UUID" }, 400);
+  }
+
+  try {
+    const result = await processInteraction(body);
+    return c.json(result);
+  } catch (err) {
+    console.error("Pipeline error:", err);
+    return c.json({ error: "Internal processing error" }, 500);
+  }
+});
+
+// ─── Core State ───────────────────────────────────────────────────────────────
+
+app.get("/api/core/:id", (c) => {
+  const { id } = c.req.param();
+  const core = getNodeCore(id);
+  if (!core) return c.json({ error: "No entity found with that ID" }, 404);
+  return c.json(core);
+});
+
+// ─── Patterns ─────────────────────────────────────────────────────────────────
+
+app.get("/api/patterns/:id", (c) => {
+  const { id } = c.req.param();
+  const patterns = getArousalPatterns(id);
+  return c.json(patterns);
+});
+
+// ─── Server Bootstrap ─────────────────────────────────────────────────────────
+
+const PORT = parseInt(process.env.PORT ?? "3001", 10);
+const registry = getRegistry();
+
+const allProviders = registry.getStatus();
+const edgeProviders  = allProviders.filter((p) => p.tier === "edge"  && p.isAvailable);
+const largeProviders = allProviders.filter((p) => p.tier === "large" && p.isAvailable);
+const hasLLMClassifier = !!(registry.cfToken && registry.cfAccountId);
+
+console.log(`\n  ANE Server`);
+console.log(`  ──────────────────────────────────────`);
+console.log(`  Listening on http://localhost:${PORT}`);
+console.log(`  Router: hybrid (rule-based + ${hasLLMClassifier ? "Cloudflare LLM classifier" : "rules-only, no Cloudflare configured"})`);
+console.log(`  Edge  : ${edgeProviders.map((p) => p.label).join(", ") || "none"}`);
+console.log(`  Large : ${largeProviders.map((p) => p.label).join(", ") || "none (local fallback)"}`);
+console.log(`  Providers:`);
+for (const p of allProviders) {
+  const icon = p.isAvailable ? "✓" : "✗";
+  const primary = p.isPrimary ? " [PRIMARY]" : "";
+  const tier = p.tier !== "local" ? ` [${p.tier}]` : "";
+  console.log(`    ${icon} ${p.label} (${p.modelId})${tier}${primary}`);
+}
+console.log(`  GIFs : ${isKlipyAvailable() ? "Klipy connected" : "disabled (set KLIPY_API_KEY)"}`);
+console.log(`  DB: ${process.env.ANE_DB_PATH ?? "ane_kernel.sqlite"}\n`);
+
+export default {
+  port: PORT,
+  fetch: app.fetch,
+};

@@ -176,8 +176,28 @@ export function getOrCreateNodeCore(id: string, designation: string): NodeCore {
   return getNodeCore(id)!;
 }
 
+// Valid enum values — used to guard writes against corrupted or malicious input.
+const VALID_ATTRIBUTES  = new Set(["sentinel", "arbiter", "catalyst"]);
+const VALID_TIERS       = new Set(["nascent", "apprentice", "adept", "sovereign", "apex"]);
+const VALID_AFFECTS     = new Set([
+  "observing", "resonating", "grounding", "activating",
+  "analyzing", "synchronizing", "dormant",
+]);
+
+function clamp(v: number, min: number, max: number): number {
+  if (!Number.isFinite(v)) return min;
+  return Math.min(max, Math.max(min, v));
+}
+
 export function updateNodeCore(core: NodeCore): void {
   const db = getDb();
+
+  // Clamp numeric fields to valid ranges and validate enums before writing.
+  // Prevents corrupted or attacker-supplied NodeCore from poisoning the DB.
+  const attribute     = VALID_ATTRIBUTES.has(core.attribute)     ? core.attribute     : "arbiter";
+  const tier          = VALID_TIERS.has(core.tier)               ? core.tier          : "nascent";
+  const currentAffect = VALID_AFFECTS.has(core.currentAffect)    ? core.currentAffect : "observing";
+
   db.query(`
     UPDATE node_core SET
       designation = ?,
@@ -195,17 +215,17 @@ export function updateNodeCore(core: NodeCore): void {
       updated_at = datetime('now')
     WHERE id = ?
   `).run(
-    core.designation,
-    core.attribute,
-    core.tier,
-    core.traits.intelligence,
-    core.traits.empathy,
-    core.traits.accuracy,
-    core.traits.loyalty,
-    core.traits.resilience,
-    core.currentAffect,
-    core.syncScore,
-    core.interactionCount,
+    core.designation.slice(0, 64),
+    attribute,
+    tier,
+    clamp(core.traits.intelligence, 0, 100),
+    clamp(core.traits.empathy,      0, 100),
+    clamp(core.traits.accuracy,     0, 100),
+    clamp(core.traits.loyalty,      0, 100),
+    clamp(core.traits.resilience,   0, 100),
+    currentAffect,
+    clamp(core.syncScore,           0, 1),
+    Math.max(0, Math.floor(core.interactionCount)),
     core.lastInteraction,
     core.id,
   );

@@ -15,10 +15,12 @@
  * SSRF protection mirrors linkProcessor.ts:
  *   - Only http/https URLs are fetched
  *   - Private/loopback/link-local addresses are blocked
- *   - Redirects are followed (follow: "follow") but scheme is re-checked
+ *   - Redirects are followed manually with re-validation at each hop
  *   - Response body is capped at 512 KB
  *   - Fetch timeout: 8 s
  */
+
+import { sanitizeExternalText, wrapExternalContext } from "../utils/promptSanitizer";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -153,6 +155,57 @@ function isSafeUrl(raw: string): boolean {
   }
   if (u.protocol !== "https:" && u.protocol !== "http:") return false;
   return !isPrivateHost(u.hostname.toLowerCase());
+}
+
+function isSafeUrlObj(u: URL): boolean {
+  if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+  return !isPrivateHost(u.hostname.toLowerCase());
+}
+
+/**
+ * Fetch a URL following redirects manually, re-validating each redirect target
+ * against the SSRF blocklist before following. Using `redirect: "manual"` so
+ * we never contact a blocked host even transiently.
+ */
+const MAX_REDIRECTS = 5;
+
+async function safeFetch(
+  url: URL,
+  init: RequestInit,
+): Promise<Response> {
+  let current = url;
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const res = await fetch(current.href, { ...init, redirect: "manual" });
+
+    // Non-redirect: return as-is
+    if (res.status < 300 || res.status >= 400) return res;
+
+    // Redirect: validate target before following
+    if (hop === MAX_REDIRECTS) throw new Error("Too many redirects");
+
+    const location = res.headers.get("location");
+    if (!location) throw new Error("Redirect missing Location header");
+
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw new Error("Invalid redirect Location value");
+    }
+
+    // Strip credentials that could have been injected via the Location header
+    next.username = "";
+    next.password = "";
+
+    if (!isSafeUrlObj(next)) {
+      throw new Error(`Redirect to blocked host: ${next.hostname}`);
+    }
+
+    current = next;
+  }
+
+  throw new Error("Too many redirects");
 }
 
 // ─── XML Helpers ──────────────────────────────────────────────────────────────
@@ -729,13 +782,13 @@ export async function fetchAndParseFeed(url: string): Promise<FeedContent | null
   }
 
   try {
-    const res = await fetch(url, {
+    const parsedUrl = new URL(url);
+    const res = await safeFetch(parsedUrl, {
       headers: {
         "User-Agent": "ANE-Companion/1.0",
         "Accept":
           "application/rss+xml, application/atom+xml, application/feed+json, application/json, application/rdf+xml, text/xml, application/xml, */*",
       },
-      redirect: "follow",
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
 
@@ -744,13 +797,7 @@ export async function fetchAndParseFeed(url: string): Promise<FeedContent | null
       return null;
     }
 
-    // Re-check final URL after redirects for SSRF
-    const finalUrl = res.url ?? url;
-    if (!isSafeUrl(finalUrl)) {
-      console.error(`[feedProcessor] Redirect to unsafe URL: ${finalUrl}`);
-      return null;
-    }
-
+    const finalUrl = url;
     const contentType = res.headers.get("content-type") ?? "";
 
     // Stream body with cap
@@ -840,17 +887,17 @@ export async function discoverFeed(url: string): Promise<FeedContent | null> {
 
   // 2. Parse HTML for <link rel="alternate">
   try {
-    const res = await fetch(url, {
+    const parsedUrl2 = new URL(url);
+    const res = await safeFetch(parsedUrl2, {
       headers: {
         "User-Agent": "ANE-Companion/1.0",
         "Accept": "text/html,application/xhtml+xml,*/*",
       },
-      redirect: "follow",
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
 
     if (res.ok) {
-      const finalUrl = res.url ?? url;
+      const finalUrl = url;
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
 
       if (contentType.includes("text/html") || contentType.includes("xhtml")) {
@@ -956,9 +1003,14 @@ export function formatFeedsForPrompt(feeds: FeedContent[]): string {
   if (feeds.length === 0) return "";
 
   const blocks = feeds.map((feed) => {
+    // Sanitize all external strings at formatting time (double-defence: parser
+    // may have been run before sanitizer was introduced, cache hit path, etc.)
+    const title       = feed.title       ? sanitizeExternalText(feed.title,       80)  : feed.url;
+    const description = feed.description ? sanitizeExternalText(feed.description, 120) : null;
+
     const header = [
-      `[Feed: ${feed.title ?? feed.url}]`,
-      feed.description ? `About: ${feed.description}` : null,
+      `[Feed: ${title}]`,
+      description ? `About: ${description}` : null,
       feed.siteUrl ? `Site: ${feed.siteUrl}` : null,
       `Format: ${feed.format.toUpperCase()}`,
     ]
@@ -970,20 +1022,21 @@ export function formatFeedsForPrompt(feeds: FeedContent[]): string {
     }
 
     const itemLines = feed.items.map((item, i) => {
+      const itemTitle  = item.title       ? sanitizeExternalText(item.title,       80)  : null;
+      const itemAuthor = item.author      ? sanitizeExternalText(item.author,       40)  : null;
+      const itemDesc   = item.description ? sanitizeExternalText(item.description, 200)  : null;
+
       const parts: string[] = [`  ${i + 1}.`];
-      if (item.title) parts.push(item.title);
-      if (item.link) parts.push(`<${item.link}>`);
-      if (item.publishedAt) parts.push(`(${item.publishedAt.slice(0, 10)})`);
-      if (item.author) parts.push(`by ${item.author}`);
+      if (itemTitle)           parts.push(itemTitle);
+      if (item.link)           parts.push(`<${item.link}>`);
+      if (item.publishedAt)    parts.push(`(${item.publishedAt.slice(0, 10)})`);
+      if (itemAuthor)          parts.push(`by ${itemAuthor}`);
       const line = parts.join(" ");
-      if (item.description) {
-        return `${line}\n     ${item.description.slice(0, 200)}`;
-      }
-      return line;
+      return itemDesc ? `${line}\n     ${itemDesc}` : line;
     });
 
     return `${header}\n${itemLines.join("\n")}`;
   });
 
-  return `\nFEED CONTENTS:\n${blocks.join("\n\n")}`;
+  return wrapExternalContext("FEED CONTENTS:", blocks.join("\n\n"));
 }

@@ -20,6 +20,7 @@
  */
 
 import type { LinkPreview } from "../types/core";
+import { sanitizeExternalText, wrapExternalContext } from "../utils/promptSanitizer";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -262,6 +263,26 @@ interface OGMeta {
   imageUrl?: string;
 }
 
+// Decode HTML entities that commonly appear in OG meta attribute values.
+// Not a full HTML parser — handles only the subset typically seen in <head>.
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+      const cp = parseInt(hex, 16);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : "";
+    })
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const cp = parseInt(dec, 10);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : "";
+    })
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&nbsp;/gi, " ");
+}
+
 function parseOGMeta(html: string, baseUrl: URL): OGMeta {
   // Extracts <meta property/name="key" content="val"> in both attribute orders
   const getMeta = (...keys: string[]): string | undefined => {
@@ -279,7 +300,7 @@ function parseOGMeta(html: string, baseUrl: URL): OGMeta {
       ];
       for (const re of patterns) {
         const m = html.match(re);
-        if (m?.[1]) return m[1].trim();
+        if (m?.[1]) return decodeHtmlEntities(m[1].trim());
       }
     }
     return undefined;
@@ -287,7 +308,10 @@ function parseOGMeta(html: string, baseUrl: URL): OGMeta {
 
   const rawTitle =
     getMeta("og:title", "twitter:title") ??
-    html.match(/<title[^>]*>([^<]{1,200})<\/title>/i)?.[1];
+    (() => {
+      const m = html.match(/<title[^>]*>([^<]{1,200})<\/title>/i);
+      return m?.[1] ? decodeHtmlEntities(m[1]) : undefined;
+    })();
 
   const rawImage = getMeta("og:image", "twitter:image");
 
@@ -305,10 +329,11 @@ function parseOGMeta(html: string, baseUrl: URL): OGMeta {
   }
 
   return {
-    title: rawTitle?.trim().replace(/\s+/g, " ").slice(0, 200),
-    description: getMeta("og:description", "twitter:description", "description")
-      ?.replace(/\s+/g, " ")
-      .slice(0, 300),
+    title: rawTitle ? sanitizeExternalText(rawTitle, 120) : undefined,
+    description: (() => {
+      const raw = getMeta("og:description", "twitter:description", "description");
+      return raw ? sanitizeExternalText(raw, 200) : undefined;
+    })(),
     imageUrl,
   };
 }
@@ -438,11 +463,16 @@ export function formatLinksForPrompt(previews: LinkPreview[]): string {
   if (safe.length === 0) return "";
 
   const lines = safe.map((p) => {
+    // Sanitize at formatting time as a final defence even though parseOGMeta
+    // already sanitized; the previews may have been cached before the sanitizer
+    // was introduced.
+    const title = p.title ? sanitizeExternalText(p.title, 120) : null;
+    const desc  = p.description ? sanitizeExternalText(p.description, 200) : null;
     const parts = [`[Link: ${p.domain}]`];
-    if (p.title) parts.push(`Title: "${p.title}"`);
-    if (p.description) parts.push(`Summary: "${p.description}"`);
+    if (title) parts.push(`Title: "${title}"`);
+    if (desc)  parts.push(`Summary: "${desc}"`);
     return parts.join(" — ");
   });
 
-  return `\nSHARED LINKS:\n${lines.join("\n")}`;
+  return wrapExternalContext("SHARED LINKS:", lines.join("\n"));
 }

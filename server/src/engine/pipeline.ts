@@ -48,6 +48,7 @@ import { resolveRouting } from "./router";
 import { detectExplicitMemoryRequest, detectDeleteRequest } from "./memoryDetection";
 import { checkDeletionSafety, safetyHoldResponse } from "./safetyGate";
 import { processLinks, formatLinksForPrompt } from "./linkProcessor";
+import { sanitizeAnchorContent, sanitizeDesignation } from "../utils/promptSanitizer";
 import { processFeedsFromText, formatFeedsForPrompt } from "./feedProcessor";
 import { linkEntities, formatEntitiesForPrompt } from "./entityLinker";
 import type { ProviderName } from "./providers/interface";
@@ -77,8 +78,10 @@ export async function processInteraction(
 ): Promise<PipelineResult> {
   const startMs = Date.now();
 
-  // 1. Load / create entity core
-  const core = getOrCreateNodeCore(req.currentCore.id, req.currentCore.designation);
+  // 1. Load / create entity core — sanitize designation before it enters any
+  //    system prompt (prevents a crafted NodeCore from injecting instructions).
+  const safeDesignation = sanitizeDesignation(req.currentCore.designation);
+  const core = getOrCreateNodeCore(req.currentCore.id, safeDesignation);
 
   // 2. Explicit delete request — "delete this" / "forget that".
   //    Locally classified. Never reaches an external AI provider.
@@ -158,13 +161,13 @@ export async function processInteraction(
   if (memoryDetection.isMemoryRequest) {
     let anchorSummary: string;
     if (memoryDetection.content) {
-      anchorSummary = memoryDetection.content;
+      anchorSummary = sanitizeAnchorContent(memoryDetection.content);
     } else {
       // "remember this" with no content — anchor the previous user turn
       const recent = getRecentConversation(core.id, 1);
       const lastUserTurn = recent.find((t) => t.role === "user");
       anchorSummary = lastUserTurn
-        ? `User asked to remember: "${lastUserTurn.content.slice(0, 150)}"`
+        ? `User asked to remember: "${sanitizeAnchorContent(lastUserTurn.content.slice(0, 150))}"`
         : "User requested context be anchored.";
     }
 

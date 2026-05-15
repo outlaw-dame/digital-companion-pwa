@@ -23,6 +23,7 @@ import { CLOUDFLARE_MODELS } from "./engine/providers/cloudflare";
 import { processLinks } from "./engine/linkProcessor";
 import { getKlipyClient, isKlipyAvailable } from "./engine/klipyClient";
 import { makeRateLimiter } from "./utils/rateLimiter";
+import { sanitizeDesignation } from "./utils/promptSanitizer";
 import type { InteractionRequest } from "./types/core";
 import type { ProviderName } from "./engine/providers/interface";
 
@@ -35,9 +36,11 @@ const MAX_INPUT_CHARS   = 4_000;       // ~3× typical paragraph; beyond this is
 const MAX_DESIGNATION   = 64;
 const UUID_RE           = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const allowPreviewRequest = makeRateLimiter(20, 60_000);
-const allowMediaRequest   = makeRateLimiter(60, 60_000);  // GIF keyboard fetches in bursts
-const allowDeleteRequest  = makeRateLimiter(10, 60_000);  // 10 deletes/minute per IP
+const allowInteractRequest  = makeRateLimiter(30, 60_000);   // 30 interactions/min per IP
+const allowPreviewRequest   = makeRateLimiter(20, 60_000);
+const allowMediaRequest     = makeRateLimiter(60, 60_000);   // GIF keyboard fetches in bursts
+const allowDeleteRequest    = makeRateLimiter(10, 60_000);   // 10 deletes/minute per IP
+const allowReadRequest      = makeRateLimiter(60, 60_000);   // read-only endpoints
 
 function clientIp(req: { header(name: string): string | undefined }): string {
   return (
@@ -96,6 +99,7 @@ app.use("/api/interact", async (c, next) => {
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 app.get("/api/health", (c) => {
+  if (!allowReadRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
   const registry = getRegistry();
   const primary = registry.getPrimaryProvider();
   return c.json({
@@ -109,11 +113,13 @@ app.get("/api/health", (c) => {
 // ─── Providers ────────────────────────────────────────────────────────────────
 
 app.get("/api/providers", (c) => {
+  if (!allowReadRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
   const registry = getRegistry();
   return c.json(registry.getStatus());
 });
 
-app.get("/api/providers/models/cloudflare", (_c) => {
+app.get("/api/providers/models/cloudflare", (c) => {
+  if (!allowReadRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
   return Response.json(CLOUDFLARE_MODELS);
 });
 
@@ -146,7 +152,14 @@ app.post("/api/links/preview", async (c) => {
     .slice(0, 5)
     .join(" ");
 
-  const previews = await processLinks(input, process.env.GOOGLE_SAFE_BROWSING_API_KEY);
+  // Overall 12 s wall-clock cap — prevents slow/hung URL fetches from tying up a handler.
+  const previews = await Promise.race([
+    processLinks(input, process.env.GOOGLE_SAFE_BROWSING_API_KEY),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("link preview timeout")), 12_000),
+    ),
+  ]).catch(() => []);
+
   return c.json({ previews });
 });
 
@@ -240,6 +253,7 @@ app.post("/api/media/gifs/:slug/share", async (c) => {
 });
 
 app.get("/api/media/status", (c) => {
+  if (!allowReadRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
   return c.json({ gifAvailable: isKlipyAvailable() });
 });
 
@@ -337,6 +351,10 @@ app.delete("/api/anchors/:anchorId", async (c) => {
 // ─── Interact ─────────────────────────────────────────────────────────────────
 
 app.post("/api/interact", async (c) => {
+  if (!allowInteractRequest(clientIp(c.req))) {
+    return c.json({ error: "Too many requests" }, 429);
+  }
+
   let body: InteractionRequest & { preferredProvider?: ProviderName };
 
   try {
@@ -359,11 +377,16 @@ app.post("/api/interact", async (c) => {
   if (!UUID_RE.test(body.currentCore.id)) {
     return c.json({ error: "currentCore.id must be a valid UUID" }, 400);
   }
-  if (typeof body.currentCore.designation !== "string" ||
-      body.currentCore.designation.trim().length === 0 ||
-      body.currentCore.designation.length > MAX_DESIGNATION) {
+  const rawDesignation = body.currentCore.designation;
+  if (typeof rawDesignation !== "string" ||
+      rawDesignation.trim().length === 0 ||
+      rawDesignation.length > MAX_DESIGNATION) {
     return c.json({ error: "currentCore.designation is invalid" }, 400);
   }
+  // Sanitize designation — prevents a crafted name from injecting into system prompts.
+  // The pipeline also sanitizes, but we do it here too so the cleaned value
+  // is consistent if the body is used directly downstream.
+  body.currentCore.designation = sanitizeDesignation(rawDesignation);
 
   if (!body.sessionId || !UUID_RE.test(body.sessionId)) {
     return c.json({ error: "sessionId must be a valid UUID" }, 400);
@@ -387,7 +410,9 @@ app.post("/api/interact", async (c) => {
 // ─── Core State ───────────────────────────────────────────────────────────────
 
 app.get("/api/core/:id", (c) => {
+  if (!allowReadRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
   const { id } = c.req.param();
+  if (!UUID_RE.test(id)) return c.json({ error: "Invalid id" }, 400);
   const core = getNodeCore(id);
   if (!core) return c.json({ error: "No entity found with that ID" }, 404);
   return c.json(core);
@@ -396,7 +421,9 @@ app.get("/api/core/:id", (c) => {
 // ─── Patterns ─────────────────────────────────────────────────────────────────
 
 app.get("/api/patterns/:id", (c) => {
+  if (!allowReadRequest(clientIp(c.req))) return c.json({ error: "Too many requests" }, 429);
   const { id } = c.req.param();
+  if (!UUID_RE.test(id)) return c.json({ error: "Invalid id" }, 400);
   const patterns = getArousalPatterns(id);
   return c.json(patterns);
 });

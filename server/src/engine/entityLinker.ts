@@ -25,6 +25,7 @@
 
 import { getEntityCache, upsertEntityCache, evictExpiredEntityCache } from "../db/kernel";
 import { ProviderError, withRetry } from "./providers/retry";
+import { sanitizeExternalText, wrapExternalContext } from "../utils/promptSanitizer";
 import type { LinkedEntity } from "../types/core";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -83,9 +84,12 @@ interface WikidataSearchResult {
 }
 
 async function searchWikidata(surface: string): Promise<LinkedEntity | null> {
+  // Cap surface length — Wikidata API rejects very long queries and the regex
+  // extractor already limits to ~30 chars, but direct callers should be safe too.
+  const safeSurface = surface.slice(0, 100);
   const params = new URLSearchParams({
     action: "wbsearchentities",
-    search: surface,
+    search: safeSurface,
     language: "en",
     uselang: "en",
     limit: "1",
@@ -112,8 +116,10 @@ async function searchWikidata(surface: string): Promise<LinkedEntity | null> {
 
       const entity: LinkedEntity = {
         surface,
-        label: hit.label,
-        description: hit.description?.slice(0, 200) ?? null,
+        label: sanitizeExternalText(hit.label, 80),
+        description: hit.description
+          ? sanitizeExternalText(hit.description, 200)
+          : null,
         wikidataUri: `https://www.wikidata.org/wiki/${hit.id}`,
         dbpediaUri: null,
         entityType: inferEntityType(hit.description ?? ""),
@@ -164,14 +170,17 @@ async function annotateWithDBpedia(text: string): Promise<LinkedEntity[]> {
       return resources
         .filter((r) => parseFloat(r["@similarityScore"]) >= 0.5)
         .slice(0, MAX_ENTITIES_PER_MSG)
-        .map((r): LinkedEntity => ({
-          surface: r["@surfaceForm"],
-          label: r["@surfaceForm"],
-          description: null,
-          wikidataUri: null,
-          dbpediaUri: r["@URI"],
-          entityType: inferEntityTypeFromDBpedia(r["@types"]),
-        }));
+        .map((r): LinkedEntity => {
+          const sf = sanitizeExternalText(r["@surfaceForm"], 80);
+          return {
+            surface: sf,
+            label: sf,
+            description: null,
+            wikidataUri: null,
+            dbpediaUri: r["@URI"],
+            entityType: inferEntityTypeFromDBpedia(r["@types"]),
+          };
+        });
     }, 2, 400);
   } catch {
     return [];
@@ -270,10 +279,13 @@ export async function linkEntities(text: string): Promise<LinkedEntity[]> {
 export function formatEntitiesForPrompt(entities: LinkedEntity[]): string {
   if (entities.length === 0) return "";
   const lines = entities.map((e) => {
-    const parts = [`[${e.entityType ?? "entity"}: ${e.label}]`];
-    if (e.description) parts.push(e.description);
+    // Sanitize at formatting time as well (cache hit path may predate sanitizer)
+    const label = sanitizeExternalText(e.label, 80);
+    const desc  = e.description ? sanitizeExternalText(e.description, 150) : null;
+    const parts = [`[${e.entityType ?? "entity"}: ${label}]`];
+    if (desc)          parts.push(desc);
     if (e.wikidataUri) parts.push(`<${e.wikidataUri}>`);
     return parts.join(" — ");
   });
-  return `\nIDENTIFIED ENTITIES:\n${lines.join("\n")}`;
+  return wrapExternalContext("IDENTIFIED ENTITIES:", lines.join("\n"));
 }

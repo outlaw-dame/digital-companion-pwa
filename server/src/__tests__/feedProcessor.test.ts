@@ -197,7 +197,7 @@ const RSS_BODY = `<?xml version="1.0" encoding="UTF-8"?>
 </rss>`;
 
 describe("parseFeed (RSS 2.0)", () => {
-  const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml");
+  const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml")!;
 
   test("parses feed title", () => {
     expect(feed.title).toBe("Test Feed");
@@ -259,7 +259,7 @@ const ATOM_BODY = `<?xml version="1.0" encoding="UTF-8"?>
 </feed>`;
 
 describe("parseFeed (Atom 1.0)", () => {
-  const feed = parseFeed(ATOM_BODY, "atom", "https://atom.example.com/feed");
+  const feed = parseFeed(ATOM_BODY, "atom", "https://atom.example.com/feed")!;
 
   test("parses feed title", () => {
     expect(feed.title).toBe("Atom Feed");
@@ -316,7 +316,7 @@ const JSON_BODY = JSON.stringify({
 });
 
 describe("parseFeed (JSON Feed)", () => {
-  const feed = parseFeed(JSON_BODY, "json", "https://json.example.com/feed.json");
+  const feed = parseFeed(JSON_BODY, "json", "https://json.example.com/feed.json")!;
 
   test("parses feed title", () => {
     expect(feed.title).toBe("JSON Feed Title");
@@ -370,7 +370,7 @@ describe("parseFeed item cap", () => {
       title: "Many Items",
       items,
     });
-    const feed = parseFeed(body, "json", "https://x.com/feed");
+    const feed = parseFeed(body, "json", "https://x.com/feed")!;
     expect(feed.items.length).toBeLessThanOrEqual(10);
   });
 });
@@ -383,14 +383,14 @@ describe("formatFeedsForPrompt", () => {
   });
 
   test("includes feed title and item titles", () => {
-    const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml");
+    const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml")!;
     const output = formatFeedsForPrompt([feed]);
     expect(output).toContain("Test Feed");
     expect(output).toContain("Item One");
   });
 
   test("includes all feeds when multiple provided", () => {
-    const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml");
+    const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml")!;
     const output = formatFeedsForPrompt([feed, feed]);
     // Both feeds appear — count occurrences of the title
     const count = (output.match(/Test Feed/g) ?? []).length;
@@ -398,7 +398,7 @@ describe("formatFeedsForPrompt", () => {
   });
 
   test("includes FEED CONTENT header", () => {
-    const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml");
+    const feed = parseFeed(RSS_BODY, "rss", "https://example.com/feed.xml")!;
     const output = formatFeedsForPrompt([feed]);
     expect(output).toContain("FEED CONTENT");
   });

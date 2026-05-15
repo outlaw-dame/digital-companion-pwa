@@ -129,8 +129,9 @@ describe("formatEntitiesForPrompt", () => {
       { surface: "B", label: "Beta",  description: null, wikidataUri: null, dbpediaUri: null, entityType: "person" },
     ];
     const output = formatEntitiesForPrompt(entities);
-    const lines = output.split("\n").filter((l) => l.startsWith("["));
-    expect(lines).toHaveLength(2);
+    // Each entity renders as [type: label]; filter lines that match that pattern
+    const entityLines = output.split("\n").filter((l) => /^\[(?:place|person|organization|entity|concept):/.test(l));
+    expect(entityLines).toHaveLength(2);
   });
 
   test("includes DBpedia URI when wikidataUri is null", () => {

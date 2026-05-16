@@ -24,6 +24,7 @@ import { processLinks } from "./engine/linkProcessor";
 import { getKlipyClient, isKlipyAvailable } from "./engine/klipyClient";
 import { makeRateLimiter } from "./utils/rateLimiter";
 import { sanitizeDesignation } from "./utils/promptSanitizer";
+import { runEmbeddingBackfill } from "./engine/memorySearch";
 import type { InteractionRequest } from "./types/core";
 import type { ProviderName } from "./engine/providers/interface";
 
@@ -453,6 +454,12 @@ for (const p of allProviders) {
 }
 console.log(`  GIFs : ${isKlipyAvailable() ? "Klipy connected" : "disabled (set KLIPY_API_KEY)"}`);
 console.log(`  DB: ${process.env.ANE_DB_PATH ?? "ane_kernel.sqlite"}\n`);
+
+// Embed any observations that predate this server version in the background.
+// Non-blocking: server is already listening when this begins.
+void runEmbeddingBackfill().catch((err: unknown) => {
+  console.warn("[startup] Embedding backfill error:", (err as Error).message);
+});
 
 export default {
   port: PORT,

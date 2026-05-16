@@ -51,6 +51,7 @@ import { processLinks, formatLinksForPrompt } from "./linkProcessor";
 import { sanitizeAnchorContent, sanitizeDesignation } from "../utils/promptSanitizer";
 import { processFeedsFromText, formatFeedsForPrompt } from "./feedProcessor";
 import { linkEntities, formatEntitiesForPrompt } from "./entityLinker";
+import { searchMemory, formatMemoriesForPrompt, scheduleEmbedding } from "./memorySearch";
 import type { ProviderName } from "./providers/interface";
 
 const LOCAL_CONFIDENCE_THRESHOLD = 0.75;
@@ -135,6 +136,7 @@ export async function processInteraction(
       used_claude_api: false,
       response_latency_ms: Date.now() - startMs,
     });
+    scheduleEmbedding(obsId);
 
     return {
       updatedCore,
@@ -209,6 +211,7 @@ export async function processInteraction(
       used_claude_api: false,
       response_latency_ms: Date.now() - startMs,
     });
+    scheduleEmbedding(memObsId);
 
     return {
       updatedCore,
@@ -227,20 +230,27 @@ export async function processInteraction(
     };
   }
 
-  // 3. Parallel: local signal + link previews + feed content + entity linking
+  // 3. Parallel: local signal + link previews + feed content + entity linking + memory search
   //    All are independent; run concurrently to minimize wall-clock latency.
-  const [signal, linkPreviews, feedPreviews, linkedEntities] = await Promise.all([
+  const [signal, linkPreviews, feedPreviews, linkedEntities, retrievedMemories] = await Promise.all([
     Promise.resolve(processLocally(req.userInput, core)),
     processLinks(req.userInput, process.env.GOOGLE_SAFE_BROWSING_API_KEY),
     processFeedsFromText(req.userInput),
     linkEntities(req.userInput),
+    searchMemory(core.id, req.userInput, {
+      k:                5,
+      alpha:            0.7,
+      excludeSessionId: req.sessionId,
+    }),
   ]);
 
   // Augment prompt with all enriched context; original userInput is preserved for logging.
+  // Recalled memories come first (highest relevance to entity identity), then external data.
+  const memoryContext = formatMemoriesForPrompt(retrievedMemories);
   const linkContext   = formatLinksForPrompt(linkPreviews);
   const feedContext   = formatFeedsForPrompt(feedPreviews);
   const entityContext = formatEntitiesForPrompt(linkedEntities);
-  const augmentation  = [linkContext, feedContext, entityContext].filter(Boolean).join("\n");
+  const augmentation  = [memoryContext, linkContext, feedContext, entityContext].filter(Boolean).join("\n");
   const promptInput   = augmentation ? `${req.userInput}\n${augmentation}` : req.userInput;
 
   // Conversation history: use thread chain when replying to a specific message,
@@ -344,6 +354,9 @@ export async function processInteraction(
     used_claude_api: usedExternalApi,
     response_latency_ms: latency,
   });
+
+  // Embed the full exchange asynchronously — does not block the response.
+  scheduleEmbedding(observationId);
 
   // 8. Memory anchor
   if (shouldCreateAnchor) {

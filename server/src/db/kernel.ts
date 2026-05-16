@@ -132,6 +132,65 @@ function initSchema(db: Database): void {
     )
   `);
 
+  // General-purpose migration tracking table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS db_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+
+  // Embedding vectors: one row per observation that has been embedded.
+  // Cascade-deletes when the parent observation is removed.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS observation_embeddings (
+      observation_id INTEGER PRIMARY KEY
+        REFERENCES observations(id) ON DELETE CASCADE,
+      embedding      BLOB NOT NULL,
+      dim            INTEGER NOT NULL,
+      model_fingerprint TEXT NOT NULL,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // FTS5 full-text index over user_input and entity_response.
+  // Uses external content so the actual text is read from the observations
+  // table on demand — we only store the inverted index here.
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+      user_input,
+      entity_response,
+      content='observations',
+      content_rowid='id'
+    )
+  `);
+
+  // Triggers keep the FTS5 index in sync with the observations table.
+  // CREATE TRIGGER IF NOT EXISTS requires SQLite ≥ 3.31 (Bun ships ≥ 3.44).
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS obs_fts_ai
+    AFTER INSERT ON observations BEGIN
+      INSERT INTO observations_fts(rowid, user_input, entity_response)
+      VALUES (new.id, new.user_input, new.entity_response);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS obs_fts_au
+    AFTER UPDATE ON observations BEGIN
+      INSERT INTO observations_fts(observations_fts, rowid, user_input, entity_response)
+      VALUES ('delete', old.id, old.user_input, old.entity_response);
+      INSERT INTO observations_fts(rowid, user_input, entity_response)
+      VALUES (new.id, new.user_input, new.entity_response);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS obs_fts_ad
+    AFTER DELETE ON observations BEGIN
+      INSERT INTO observations_fts(observations_fts, rowid, user_input, entity_response)
+      VALUES ('delete', old.id, old.user_input, old.entity_response);
+    END
+  `);
+
   // Migrations for existing databases (try-catch for portability)
   for (const migration of [
     `ALTER TABLE observations ADD COLUMN entity_response TEXT NOT NULL DEFAULT ''`,
@@ -140,12 +199,23 @@ function initSchema(db: Database): void {
     try { db.exec(migration); } catch { /* column exists — skip */ }
   }
 
+  // Backfill FTS5 index for observations that existed before this schema.
+  // Only runs once; tracked in db_meta so subsequent startups are instant.
+  const ftsBuilt = db
+    .query<{ value: string }, []>(`SELECT value FROM db_meta WHERE key = 'fts_built'`)
+    .get();
+  if (!ftsBuilt) {
+    db.exec(`INSERT INTO observations_fts(observations_fts) VALUES ('rebuild')`);
+    db.exec(`INSERT INTO db_meta (key, value) VALUES ('fts_built', '1')`);
+  }
+
   // Indexes for temporal queries and thread traversal
   db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_timestamp ON observations(node_id, timestamp)`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id)`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_parent ON observations(parent_id)`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_entity_cache_expires ON entity_cache(expires_at)`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_feed_cache_expires ON feed_cache(expires_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_session   ON observations(session_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_observations_parent    ON observations(parent_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_embeddings_fingerprint ON observation_embeddings(model_fingerprint)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_entity_cache_expires   ON entity_cache(expires_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_feed_cache_expires     ON feed_cache(expires_at)`);
 }
 
 // ─── NodeCore CRUD ────────────────────────────────────────────────────────────
@@ -584,6 +654,188 @@ function deserializeCore(
     lastInteraction: row.last_interaction as string | null,
     memoryAnchors: anchors,
   };
+}
+
+// ─── Memory Search — DB Layer ─────────────────────────────────────────────────
+// Low-level read/write functions for FTS5 and embedding storage.
+// Higher-level search logic lives in engine/memorySearch.ts.
+
+export interface FTSRow {
+  obsId: number;
+  rawScore: number;   // BM25 rank — negative; more negative = better match
+}
+
+/**
+ * BM25 full-text search over observations for a node.
+ * Excludes the current session so recent turns are not echo'd back as memories.
+ * Returns at most `limit` rows, ordered by relevance (best first).
+ */
+export function getFTSResults(
+  nodeId: string,
+  query: string,
+  excludeSessionId: string,
+  limit = 50,
+): FTSRow[] {
+  if (!query.trim()) return [];
+  const db = getDb();
+  try {
+    return db.query<{ obsId: number; rawScore: number }, [string, string, string, number]>(`
+      SELECT o.id AS obsId,
+             bm25(observations_fts, 5.0, 1.0) AS rawScore
+      FROM   observations_fts
+      JOIN   observations o ON o.id = observations_fts.rowid
+      WHERE  observations_fts MATCH ?
+        AND  o.node_id = ?
+        AND  o.session_id != ?
+        AND  o.entity_response != ''
+      ORDER  BY rawScore
+      LIMIT  ?
+    `).all(query, nodeId, excludeSessionId, limit);
+  } catch {
+    // FTS5 MATCH throws on malformed queries — treat as no results
+    return [];
+  }
+}
+
+export interface EmbeddingRow {
+  obsId: number;
+  embedding: Buffer;
+  dim: number;
+}
+
+/**
+ * Load all stored embeddings for a node that match the active model fingerprint.
+ * Capped at `limit` most-recent rows to bound memory usage.
+ */
+export function getNodeEmbeddings(
+  nodeId: string,
+  modelFingerprint: string,
+  limit = 5_000,
+): EmbeddingRow[] {
+  const db = getDb();
+  return db.query<EmbeddingRow, [string, string, number]>(`
+    SELECT e.observation_id AS obsId, e.embedding, e.dim
+    FROM   observation_embeddings e
+    JOIN   observations o ON o.id = e.observation_id
+    WHERE  o.node_id = ?
+      AND  e.model_fingerprint = ?
+      AND  o.entity_response != ''
+    ORDER  BY e.observation_id DESC
+    LIMIT  ?
+  `).all(nodeId, modelFingerprint, limit);
+}
+
+/**
+ * Persist (or replace) an embedding for a given observation.
+ * Safe to call concurrently — uses INSERT OR REPLACE.
+ */
+export function upsertEmbedding(
+  observationId: number,
+  embedding: Buffer,
+  dim: number,
+  modelFingerprint: string,
+): void {
+  getDb().query(`
+    INSERT OR REPLACE INTO observation_embeddings
+      (observation_id, embedding, dim, model_fingerprint, created_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+  `).run(observationId, embedding, dim, modelFingerprint);
+}
+
+export interface ObservationExcerpt {
+  id: number;
+  user_input: string;
+  entity_response: string;
+  timestamp: string;
+  arousal_level: number;
+  valence: string;
+}
+
+/**
+ * Fetch full observation excerpts by ID list, ownership-checked.
+ * Returns only rows belonging to `nodeId` — never leaks cross-node data.
+ * Preserves caller-supplied ordering by re-sorting results to match `ids`.
+ */
+export function getObservationsByIds(
+  ids: number[],
+  nodeId: string,
+): ObservationExcerpt[] {
+  if (ids.length === 0) return [];
+  const db = getDb();
+  const placeholders = ids.map(() => "?").join(",");
+  // Dynamic IN list — use untyped call and cast for bun:sqlite compatibility.
+  const rows = db.query(`
+    SELECT id, user_input, entity_response, timestamp, arousal_level, valence
+    FROM   observations
+    WHERE  id IN (${placeholders})
+      AND  node_id = ?
+      AND  entity_response != ''
+  `).all(...(ids as (number | string)[]), nodeId) as ObservationExcerpt[];
+
+  // Restore caller order (SQL IN clause does not guarantee ordering)
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ids.flatMap((id) => {
+    const r = byId.get(id);
+    return r ? [r] : [];
+  });
+}
+
+/**
+ * Return observation IDs that have no embedding for the given model fingerprint.
+ * Used by the backfill process. Returns oldest-first so backfill builds
+ * from the past forward, giving coverage even if interrupted.
+ */
+export function getObservationIdsWithoutEmbeddings(
+  nodeId: string,
+  modelFingerprint: string,
+  limit = 50,
+): number[] {
+  const db = getDb();
+  const rows = db.query<{ id: number }, [string, string, number]>(`
+    SELECT o.id
+    FROM   observations o
+    LEFT JOIN observation_embeddings e
+           ON e.observation_id = o.id
+          AND e.model_fingerprint = ?
+    WHERE  o.node_id = ?
+      AND  o.entity_response != ''
+      AND  e.observation_id IS NULL
+    ORDER  BY o.id ASC
+    LIMIT  ?
+  `).all(modelFingerprint, nodeId, limit);
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Return ALL distinct node IDs that have un-embedded observations for
+ * the given model fingerprint. Used by the startup backfill pass.
+ */
+export function getNodesWithPendingEmbeddings(modelFingerprint: string): string[] {
+  const db = getDb();
+  const rows = db.query<{ node_id: string }, [string]>(`
+    SELECT DISTINCT o.node_id
+    FROM   observations o
+    LEFT JOIN observation_embeddings e
+           ON e.observation_id = o.id
+          AND e.model_fingerprint = ?
+    WHERE  o.entity_response != ''
+      AND  e.observation_id IS NULL
+  `).all(modelFingerprint);
+  return rows.map((r) => r.node_id);
+}
+
+/**
+ * Return the text content of a single observation for embedding.
+ * Returns null if not found or not yet responded to.
+ */
+export function getObservationText(id: number): string | null {
+  const db = getDb();
+  const row = db.query<{ user_input: string; entity_response: string }, [number]>(`
+    SELECT user_input, entity_response FROM observations
+    WHERE id = ? AND entity_response != ''
+  `).get(id);
+  if (!row) return null;
+  return `${row.user_input} ${row.entity_response}`.trim();
 }
 
 // ─── Test Injection ───────────────────────────────────────────────────────────
